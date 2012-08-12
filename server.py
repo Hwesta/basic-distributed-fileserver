@@ -1,9 +1,13 @@
 #! /usr/bin/python2
 # TODO Remember to change this to python
 
+# Twisted - networking library
 from twisted.internet.protocol import Factory
 from twisted.protocols.basic import LineReceiver
 from twisted.internet import reactor
+
+# Other
+import argparse
 
 class Chat(LineReceiver):
 
@@ -48,10 +52,22 @@ class ChatFactory(Factory):
 
     def buildProtocol(self, addr):
         return Chat(self.users)
+  
 
+def runserver():
+    # Parse arguments
+    parser = argparse.ArgumentParser(description='Run a distributed fileserver.')
+    parser.add_argument('-ip', default='127.0.0.1', help="IP of the server.")
+    parser.add_argument('-port', default=8080, type=int, help="Port the server runs on.")
+    parser.add_argument('-dir', required=True, help='Directory to store files in.')
+    args = parser.parse_args()
 
-reactor.listenTCP(8123, ChatFactory())
-reactor.run()
+    reactor.listenTCP(args.port, ChatFactory(), interface=args.ip)
+    reactor.run()
+
+# Start the server
+if __name__ == '__main__':
+    runserver()
 
 
 
