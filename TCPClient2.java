@@ -4,7 +4,7 @@ import java.util.Date;
 import java.util.Random;
 import java.text.SimpleDateFormat;
 
-public class TCPClient
+public class TCPClient2
 {
 	//A 4KB buffer to receive server messages.
 	final static int BUF_LEN = 4096; 

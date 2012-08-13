@@ -1,58 +1,106 @@
 #! /usr/bin/python2
 # TODO Remember to change this to python
+# -*- test-case-name: a2.test.test_server -*-
 
 # Twisted - networking library
 from twisted.internet.protocol import Factory
 from twisted.protocols.basic import LineReceiver
+from twisted.protocols.policies import TimeoutMixin
 from twisted.internet import reactor
 
 # Other
 import argparse
 
-class Chat(LineReceiver):
+# Messages parsing modeled off of twisted.web.http HTTPClient and HTTPChannel
+class Server(LineReceiver, TimeoutMixin):
 
-    def __init__(self, users):
-        self.users = users
-        self.name = None
-        self.state = "GETNAME"
+    method = None
+    txn = None
+    seq = None
+    length = None
+    buf = None
+    data = True
+    firstLine = True
+
+    def __init__(self, dir):
+        self.dir = dir
 
     def connectionMade(self):
-        self.sendLine("What's your name?")
+        self.setTimeout(3)
 
     def connectionLost(self, reason):
-        if self.users.has_key(self.name):
-            del self.users[self.name]
+        self.setTimeout(None)
 
     def lineReceived(self, line):
-        if self.state == "GETNAME":
-            self.handle_GETNAME(line)
-        else:
-            self.handle_CHAT(line)
-
-    def handle_GETNAME(self, name):
-        if self.users.has_key(name):
-            self.sendLine("Name taken, please choose another.")
+        self.resetTimeout()
+        if self.firstLine:
+            self.firstLine = False
+            l = line.split()
+            if len(l) != 4:
+                self.send_error(204, "Header is wrong length")
+                return
+            self.method, self.txn, self.seq, self.length = l
+            try:
+                self.txn = int(self.txn)
+                self.seq = int(self.seq)
+                self.length = int(self.length)
+            except ValueError:
+                self.send_error(204, "Header has non-numeric value")
+                return
+            #print "DEBUG: Header received:", self.method, self.txn, self.seq, self.length
             return
-        self.sendLine("Welcome, %s!" % (name,))
-        self.name = name
-        self.users[name] = self
-        self.state = "CHAT"
+        # Second empty line, and no expected data
+        if not self.data:
+            self.process_message()
+        # Blank line - prepare to process data
+        if not line:
+            if self.length == 0: # COMMIT or ABORT
+                self.data = False
+                return
+            self.buf = ""
+            self.setRawMode() # Data arrives at rawDataReceived
 
-    def handle_CHAT(self, message):
-        message = "<%s> %s" % (self.name, message)
-        for name, protocol in self.users.iteritems():
-            if protocol != self:
-                protocol.sendLine(message)
+    def rawDataReceived(self, data):
+        if self.length is not None:
+            data, rest = data[:self.length], data[self.length:]
+            self.buf += data
+            self.length -= len(data)
+        if self.length == 0:
+            self.process_message()
+            self.setLineMode(rest)
+
+    def timeoutConnection(self):
+        #print "Timing out client: %s" % str(self.transport.getPeer())
+        self.send_error(204, "Connection timed out (length longer than data?)")
+
+    def send_error(self, err_num, err_reason):
+
+        # 201 - Invalid transaction ID. Sent by the server if the client had sent a message that included an invalid transaction ID, i.e., a transaction ID that the server does not remember
+        # 202 - Invalid operation. Sent by the server if the client attemtps to execute an invalid operation - i.e., write as part of a transaction that had been committed
+        # 204 - Wrong message format. Sent by the server if the message sent by the client does not follow the specified message format
+        # 205 - File I/O error
+        # 206 - File not found
+
+        if not isinstance(self.txn, int):
+            self.txn = -1
+        error = "ERROR %d 0 %d %d\r\n\r\n%s" % (self.txn, err_num, len(err_reason), err_reason)
+        self.sendLine(error)
+        self.transport.loseConnection()
+
+    def process_message(self):
+        self.setTimeout(None)
+        self.sendLine("Method: %s, txn: %d, seq: %d, buf: %s" % (self.method, self.txn, self.seq, self.buf))
+ 
 
 
-class ChatFactory(Factory):
+class ServerFactory(Factory):
 
-    def __init__(self):
-        self.users = {} # maps user names to Chat instances
+    def __init__(self, dir):
+        self.dir = dir
 
     def buildProtocol(self, addr):
-        return Chat(self.users)
-  
+        return Server(self.dir)
+
 
 def runserver():
     # Parse arguments
@@ -62,12 +110,17 @@ def runserver():
     parser.add_argument('-dir', required=True, help='Directory to store files in.')
     args = parser.parse_args()
 
-    reactor.listenTCP(args.port, ChatFactory(), interface=args.ip)
+    reactor.listenTCP(args.port, ServerFactory(args.dir), interface=args.ip)
     reactor.run()
 
 # Start the server
 if __name__ == '__main__':
     runserver()
+
+# Store:
+#   Current directory
+#   transaction IDs, associated file (dict?)  Log to file? (as JSON?)
+#   
 
 
 
