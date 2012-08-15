@@ -49,10 +49,10 @@ class ServerTestCase(unittest.TestCase):
     #     return self._test(send, expected)
 
 
-    # def test_test(self):
-    #     send = "WRITE -1 0 44\r\n\r\nWRITE -1 0 0 Mon, 13 Aug 2012 15:17:45 -0700"
-    #     expected = "Method: WRITE, txn: -1, seq: 0, buf: WRITE -1 0 0 Mon, 13 Aug 2012 15:17:45 -0700\r\n"
-    #     return self._test(send, expected)
+    def test_test(self):
+        send = "WRITE -1 0 44\r\n\r\nWRITE -1 0 0 Mon, 13 Aug 2012 15:17:45 -0700"
+        expected = "Method: WRITE, txn: -1, seq: 0, buf: WRITE -1 0 0 Mon, 13 Aug 2012 15:17:45 -0700\r\n"
+        return self._test(send, expected)
 
 
 

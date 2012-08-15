@@ -22,11 +22,13 @@ class Server(LineReceiver, TimeoutMixin):
     data = True
     firstLine = True
 
+    #delimiter='\0' # Inexplicably causes tests to fail
+
     def __init__(self, dir):
         self.dir = dir
 
     def connectionMade(self):
-        self.setTimeout(3)
+        self.setTimeout(3) # seconds
 
     def connectionLost(self, reason):
         self.setTimeout(None)
@@ -49,7 +51,7 @@ class Server(LineReceiver, TimeoutMixin):
                 return
             #print "DEBUG: Header received:", self.method, self.txn, self.seq, self.length
             return
-        # Second empty line, and no expected data
+        # No expected data
         if not self.data:
             self.process_message()
         # Blank line - prepare to process data
@@ -70,11 +72,10 @@ class Server(LineReceiver, TimeoutMixin):
             self.setLineMode(rest)
 
     def timeoutConnection(self):
-        #print "Timing out client: %s" % str(self.transport.getPeer())
-        self.send_error(204, "Connection timed out (length longer than data?)")
+        print "Timing out client: %s" % str(self.transport.getPeer())
+        self.send_error(204, "Connection timed out (is length longer than data?)")
 
     def send_error(self, err_num, err_reason):
-
         # 201 - Invalid transaction ID. Sent by the server if the client had sent a message that included an invalid transaction ID, i.e., a transaction ID that the server does not remember
         # 202 - Invalid operation. Sent by the server if the client attemtps to execute an invalid operation - i.e., write as part of a transaction that had been committed
         # 204 - Wrong message format. Sent by the server if the message sent by the client does not follow the specified message format
@@ -85,12 +86,16 @@ class Server(LineReceiver, TimeoutMixin):
             self.txn = -1
         error = "ERROR %d 0 %d %d\r\n\r\n%s" % (self.txn, err_num, len(err_reason), err_reason)
         self.sendLine(error)
+        # self.transport.write(error)
         self.transport.loseConnection()
 
     def process_message(self):
         self.setTimeout(None)
-        self.sendLine("Method: %s, txn: %d, seq: %d, buf: %s" % (self.method, self.txn, self.seq, self.buf))
+        self.sendLine("Method: %s, txn: %d, seq: %d, buf: %s\0" % (self.method, self.txn, self.seq, self.buf))
+        # self.transport.write("Method: %s, txn: %d, seq: %d, buf: %s\0" % (self.method, self.txn, self.seq, self.buf))
  
+    def process_NEW_TXN(self):
+        pass
 
 
 class ServerFactory(Factory):
@@ -119,7 +124,10 @@ if __name__ == '__main__':
 
 # Store:
 #   Current directory
-#   transaction IDs, associated file (dict?)  Log to file? (as JSON?)
+#   transaction IDs
+#       associated file (dict?)
+#       Log? (as JSON?)
+#       Status (commit, abort, # of writes received)
 #   
 
 
