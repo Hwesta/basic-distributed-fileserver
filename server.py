@@ -289,14 +289,46 @@ class ServerFactory(Factory):
         if len (unsent) != 0:
             return ('ASK_RESEND', 0, unsent)
 
-        # Write data to file
+        # Write to the file
 
+        filename = txn_info['file']
+        lock_file = self.logdir+".lock-"+filename # Make this a hash??
+        data = "".join([txn_info['writes'][k] for k in txn_info['writes'] if k < seq])
+        print data
+
+        # If the lock file exists, another transaction is comitting
+        while os.path.isfile(lock_file):
+            print 'locked'
+            sleep(0.05)
+
+        try:
+            # Copy existing file to lock
+            if os.path.isfile(filename):
+                print "existing file"
+                shutil.copy2(new_file, lock_file)
+            # Write data
+            f = open(lock_file, 'a')
+            # Log that opened and writing??
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+            txn_info['status'] = 'COMMIT'
+
+            # Copy back
+            shutil.move(lock_file, filename)
+        except:
+            return 'ERROR', 205, "File IO error.  Check server settings and permissions."
+        finally:
+            f.close()
+            try:
+                os.remove(lock_file)
+            except:
+                pass
 
         # Write to log, write out
-        txn_info['status'] = 'COMMIT'
         self.txn_list[str(txn_id)] = txn_info
-        print self.txn_list
         self.txn_list.sync()
+        print self.txn_list
 
         return ('ACK', 0, None)
 
