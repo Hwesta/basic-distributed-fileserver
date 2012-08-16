@@ -11,7 +11,8 @@ from twisted.internet import reactor
 # Other
 import argparse
 import os, sys, errno
-import shelve
+import shelve # For writing out dictionary
+import shutil # For file copy
 
 # Messages parsing modeled off of twisted.web.http HTTPClient and HTTPChannel
 class Server(LineReceiver, TimeoutMixin):
@@ -21,7 +22,7 @@ class Server(LineReceiver, TimeoutMixin):
     seq = None
     length = None
     buf = None
-    data = True
+    data = True # Is there data for this message?
     firstLine = True
 
     def connectionMade(self):
@@ -116,14 +117,20 @@ class Server(LineReceiver, TimeoutMixin):
             self.sendError(204, "Method does not exist")
  
     def processREAD(self):
-        pass
+        self.transport.loseConnection()
 
     def processNEW_TXN(self):
-        txn_id = self.factory.startNewTxn(self.buf)
-        self.sendACK(txn_id)
+        (txn_id, error, error_reason) = self.factory.startNewTxn(self.buf)
+        if error != 0:
+            self.sendError(error, error_reason)
+        else:
+            self.sendACK(txn_id)
 
     def processWRITE(self):
-        pass
+        (error, error_reason) = self.factory.saveWrite(self.txn, self.seq, self.buf)
+        if error != 0:
+            self.sendError(error, error_reason)
+        self.transport.loseConnection()
 
     def processCOMMIT(self):
         pass
@@ -135,7 +142,6 @@ class Server(LineReceiver, TimeoutMixin):
 
 class ServerFactory(Factory):
     protocol = Server
-    cwd = None
     logdir = None
     logfile = None
     txn_list = None
@@ -147,10 +153,11 @@ class ServerFactory(Factory):
             print "Path %s does not exist or is not a directory." % cwd
             sys.exit(-1)
         else:
-            self.cwd = cwd
+            os.chdir(cwd)
+        print "cwd", os.getcwd()
 
         # Create hidden log dir
-        self.logdir = cwd+"/.server_log/"
+        self.logdir = ".server_log/"
         try:
             os.makedirs(self.logdir)
         except OSError as exception:
@@ -160,35 +167,76 @@ class ServerFactory(Factory):
 
         self.logfile = self.logdir+"log"
         # If logs exist, read from disk
-        log = shelve.open(self.logfile)
-        if not os.path.isfile(self.logfile):
+        if os.path.isfile(self.logfile):
+            log = shelve.open(self.logfile)
+        else:
             print 'log dne'
+            log = shelve.open(self.logfile)
             log['next_id'] = 1
         self.txn_list = log
         print 'self txn list', self.txn_list
 
     def __del__(self):
-        self.txn_list.close()
+        if self.txn_list is not None:
+            self.txn_list.close()
+        # Delete log files, since it was a 'graceful' shutdown?
 
-    def startNewTxn(self, file):
+    def startNewTxn(self, new_file):
         txn_id = self.txn_list['next_id']
-        txn_info = {'file': file, 'status': 'NEW_TXN', 'writes': []}
+        txn_info = {'file': new_file, 'status': 'NEW_TXN', 'writes': {}}
+        # temp_file = self.logdir+new_file+str(txn_id)
+
+        # CHECK Do I need to create the log file?
+        # Open/Create file
+        if os.path.isdir(new_file): # Directory - error
+            print "dir"
+            return txn_id, 205, "A directory with that name already exists."
+        # elif os.path.isfile(new_file): # Existing file, copy to log dir
+        #     print "existing file"
+        #     try:
+        #         shutil.copy2(new_file, temp_file)
+        #     except:
+        #         return txn_id, 205, "File IO error.  Check server settings and permissions."
+        # else: # New file - create log file
+        #     print "new file"
+        #     try:
+        #         f = open(temp_file, 'w+')
+        #     except:
+        #         return txn_id, 205, "File IO error.  Check server settings and permissions."
+        #     f.close()
         
+        # Update log
         self.txn_list['next_id']=txn_id+1
         self.txn_list[str(txn_id)] = txn_info
         print self.txn_list
-        print self.txn_list[str(txn_id)]
-        self.txn_list.sync()
-        self.txn_list.sync()
-        
-        # TODO Open/Create file
-        #   Could create fileIO error
-        
- 
-        return txn_id
 
-    def getTxn(self, txn_id):
+        # Flush log to disk
+        self.txn_list.sync()
+        self.txn_list.sync()
+ 
+        return txn_id, 0, None
+
+    def saveWrite(self, txn_id, seq, buf):
+        if str(txn_id) not in self.txn_list:
+            return (201, "Unknown transaction id.")
+        else:
+            txn_info = self.txn_list[str(txn_id)]
+
+        if seq < 0:
+            return (204, "Sequence number has to be a positive integer.")
+
+        txn_info['writes'][seq] = buf
+        self.txn_list[str(txn_id)] = txn_info
+        print self.txn_list
+        self.txn_list.sync()
+
+        return 0, None
+
+    def commitTxn(self):
         pass
+        # Check that have right number of things
+        # if all (str(k) in self.txn_list for k in range(seq)):
+
 
 def runserver():
     # Parse arguments

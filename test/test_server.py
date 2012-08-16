@@ -9,9 +9,11 @@ class ServerTestCase(unittest.TestCase):
     #
     # reason
     _error_string = "ERROR %d 0 %d %d\r\n\r\n%s\r\n"
+    _ack_string = "ACK %d 0 0 0\r\n\r\n\r\n"
+    _resend_string = "ASK_RESEND %d %d 0 0\r\n\r\n\r\n"
 
     def setUp(self):
-        factory = ServerFactory('~')
+        factory = ServerFactory('/home/holly/universityEtc/cmpt431/a2/test/')
         self.proto = factory.buildProtocol(('127.0.0.1', 1234))
         self.tr = proto_helpers.StringTransport()
         self.proto.makeConnection(self.tr)
@@ -48,6 +50,11 @@ class ServerTestCase(unittest.TestCase):
     #     expected = self._error_string % (-1, 204, len(err), err)
     #     return self._test(send, expected)
 
+    def test_new_txn(self):
+        send = "NEW_TXN -1 0 24\r\ntest_file_1841436071.txt\r\n"
+        err = "Header has non-numeric value"
+        expected = self._ack_string % (1) # how to have this change?
+        return self._test(send, expected)
 
     def test_test(self):
         send = "WRITE -1 0 44\r\n\r\nWRITE -1 0 0 Mon, 13 Aug 2012 15:17:45 -0700"
