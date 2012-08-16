@@ -10,6 +10,8 @@ from twisted.internet import reactor
 
 # Other
 import argparse
+import os, sys, errno
+import shelve
 
 # Messages parsing modeled off of twisted.web.http HTTPClient and HTTPChannel
 class Server(LineReceiver, TimeoutMixin):
@@ -21,11 +23,6 @@ class Server(LineReceiver, TimeoutMixin):
     buf = None
     data = True
     firstLine = True
-
-    #delimiter='\0' # Inexplicably causes tests to fail
-
-    def __init__(self, dir):
-        self.dir = dir
 
     def connectionMade(self):
         self.setTimeout(3) # seconds
@@ -39,7 +36,7 @@ class Server(LineReceiver, TimeoutMixin):
             self.firstLine = False
             l = line.split()
             if len(l) != 4:
-                self.send_error(204, "Header is wrong length")
+                self.sendError(204, "Header is wrong length")
                 return
             self.method, self.txn, self.seq, self.length = l
             try:
@@ -47,13 +44,13 @@ class Server(LineReceiver, TimeoutMixin):
                 self.seq = int(self.seq)
                 self.length = int(self.length)
             except ValueError:
-                self.send_error(204, "Header has non-numeric value")
+                self.sendError(204, "Header has non-numeric value")
                 return
             #print "DEBUG: Header received:", self.method, self.txn, self.seq, self.length
             return
         # No expected data
         if not self.data:
-            self.process_message()
+            self.processMessage()
         # Blank line - prepare to process data
         if not line:
             if self.length == 0: # COMMIT or ABORT
@@ -68,19 +65,19 @@ class Server(LineReceiver, TimeoutMixin):
             self.buf += data
             self.length -= len(data)
         if self.length == 0:
-            self.process_message()
+            self.processMessage()
             self.setLineMode(rest)
 
     def timeoutConnection(self):
         print "Timing out client: %s" % str(self.transport.getPeer())
-        self.send_error(204, "Connection timed out (is length longer than data?)")
+        self.sendError(204, "Connection timed out (is length longer than data?)")
 
-    def send_error(self, err_num, err_reason):
+    def sendError(self, err_num, err_reason):
         # 201 - Invalid transaction ID. Sent by the server if the client had sent a message that included an invalid transaction ID, i.e., a transaction ID that the server does not remember
         # 202 - Invalid operation. Sent by the server if the client attemtps to execute an invalid operation - i.e., write as part of a transaction that had been committed
         # 204 - Wrong message format. Sent by the server if the message sent by the client does not follow the specified message format
         # 205 - File I/O error
-        # 206 - File not found
+        # 206 - File not found (read)
 
         if not isinstance(self.txn, int):
             self.txn = -1
@@ -89,23 +86,109 @@ class Server(LineReceiver, TimeoutMixin):
         # self.transport.write(error)
         self.transport.loseConnection()
 
-    def process_message(self):
+    def sendACK(self, txn_id):
+        ack = "ACK %d 0 0 0\r\n\r\n\r\n" % (txn_id)
+        self.sendLine(ack)
+        self.transport.loseConnection()
+
+    # TEST THIS
+    def sendASK_RESEND(self, txn_id, missing_writes):
+        resend_string = "ASK_RESEND %d %d 0 0\r\n\r\n\r\n"
+        for write in missing_writes:
+            resend = resend_string % (txn_id, write)
+            self.sendLine(resend)
+        self.transport.loseConnection()
+
+    def processMessage(self):
         self.setTimeout(None)
         self.sendLine("Method: %s, txn: %d, seq: %d, buf: %s\0" % (self.method, self.txn, self.seq, self.buf))
-        # self.transport.write("Method: %s, txn: %d, seq: %d, buf: %s\0" % (self.method, self.txn, self.seq, self.buf))
+        if self.method == "READ":
+            self.processREAD()
+        elif self.method == "NEW_TXN":
+            self.processNEW_TXN()
+        elif self.method == "WRITE":
+            self.processWRITE()
+        elif self.method == "COMMIT":
+            self.processCOMMIT()
+        elif self.method == "ABORT":
+            self.processABORT()
+        else:
+            self.sendError(204, "Method does not exist")
  
-    def process_NEW_TXN(self):
+    def processREAD(self):
+        pass
+
+    def processNEW_TXN(self):
+        txn_id = self.factory.startNewTxn(self.buf)
+        self.sendACK(txn_id)
+
+    def processWRITE(self):
+        pass
+
+    def processCOMMIT(self):
+        pass
+
+    def processABORT(self):
         pass
 
 
+
 class ServerFactory(Factory):
+    protocol = Server
+    cwd = None
+    logdir = None
+    logfile = None
+    txn_list = None
 
-    def __init__(self, dir):
-        self.dir = dir
+    def __init__(self, cwd):
 
-    def buildProtocol(self, addr):
-        return Server(self.dir)
+        # Check if directory exists
+        if not os.path.isdir(cwd):
+            print "Path %s does not exist or is not a directory." % cwd
+            sys.exit(-1)
+        else:
+            self.cwd = cwd
 
+        # Create hidden log dir
+        self.logdir = cwd+"/.server_log/"
+        try:
+            os.makedirs(self.logdir)
+        except OSError as exception:
+            if exception.errno != errno.EEXIST:
+                print "Could not initialize server.  Does the directory have execute permission?"
+                sys.exit(-1)
+
+        self.logfile = self.logdir+"log"
+        # If logs exist, read from disk
+        log = shelve.open(self.logfile)
+        if not os.path.isfile(self.logfile):
+            print 'log dne'
+            log['next_id'] = 1
+        self.txn_list = log
+        print 'self txn list', self.txn_list
+
+    def __del__(self):
+        self.txn_list.close()
+
+    def startNewTxn(self, file):
+        txn_id = self.txn_list['next_id']
+        txn_info = {'file': file, 'status': 'NEW_TXN', 'writes': []}
+        
+        self.txn_list['next_id']=txn_id+1
+        self.txn_list[str(txn_id)] = txn_info
+        print self.txn_list
+        print self.txn_list[str(txn_id)]
+        self.txn_list.sync()
+        self.txn_list.sync()
+        
+        # TODO Open/Create file
+        #   Could create fileIO error
+        
+ 
+        return txn_id
+
+    def getTxn(self, txn_id):
+        pass
 
 def runserver():
     # Parse arguments
@@ -121,14 +204,7 @@ def runserver():
 # Start the server
 if __name__ == '__main__':
     runserver()
-
-# Store:
-#   Current directory
-#   transaction IDs
-#       associated file (dict?)
-#       Log? (as JSON?)
-#       Status (commit, abort, # of writes received)
-#   
+ 
 
 
 
