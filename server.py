@@ -136,7 +136,11 @@ class Server(LineReceiver, TimeoutMixin):
         pass
 
     def processABORT(self):
-        pass
+        (error, error_reason) = self.factory.abortTxn(self.txn)
+        if error != 0:
+            self.sendError(error, error_reason)
+        else:
+            self.sendACK(self.txn)
 
 
 
@@ -222,6 +226,12 @@ class ServerFactory(Factory):
         else:
             txn_info = self.txn_list[str(txn_id)]
 
+        # TODO Test these
+        if txn_info['status'] == 'ABORT':
+            return (202, "Transaction has been aborted.")
+        elif txn_info['status'] == 'COMMIT':
+            return (202, "Transaction has been comitted already.")
+
         if seq < 0:
             return (204, "Sequence number has to be a positive integer.")
 
@@ -230,6 +240,22 @@ class ServerFactory(Factory):
         print self.txn_list
         self.txn_list.sync()
 
+        return 0, None
+
+    def abortTxn(self, txn_id):
+        if str(txn_id) not in self.txn_list:
+            return (201, "Unknown transaction id.")
+        else:
+            txn_info = self.txn_list[str(txn_id)]
+
+        if txn_info['status'] == 'COMMIT':
+            return (202, "Transaction has been comitted already.")
+        elif txn_info['status'] == 'NEW_TXN':
+            txn_info['status'] = 'ABORT'
+
+        self.txn_list[str(txn_id)] = txn_info
+        print self.txn_list
+        self.txn_list.sync()
         return 0, None
 
     def commitTxn(self):
