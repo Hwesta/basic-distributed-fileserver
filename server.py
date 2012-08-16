@@ -87,16 +87,15 @@ class Server(LineReceiver, TimeoutMixin):
         # self.transport.write(error)
         self.transport.loseConnection()
 
-    def sendACK(self, txn_id):
-        ack = "ACK %d 0 0 0\r\n\r\n\r\n" % (txn_id)
+    def sendACK(self):
+        ack = "ACK %d 0 0 0\r\n\r\n\r\n" % (self.txn)
         self.sendLine(ack)
         self.transport.loseConnection()
 
-    # TEST THIS
-    def sendASK_RESEND(self, txn_id, missing_writes):
+    def sendASK_RESEND(self, missing_writes):
         resend_string = "ASK_RESEND %d %d 0 0\r\n\r\n\r\n"
         for write in missing_writes:
-            resend = resend_string % (txn_id, write)
+            resend = resend_string % (self.txn, write)
             self.sendLine(resend)
         self.transport.loseConnection()
 
@@ -124,7 +123,8 @@ class Server(LineReceiver, TimeoutMixin):
         if error != 0:
             self.sendError(error, error_reason)
         else:
-            self.sendACK(txn_id)
+            self.txn = txn_id
+            self.sendACK()
 
     def processWRITE(self):
         (error, error_reason) = self.factory.saveWrite(self.txn, self.seq, self.buf)
@@ -132,16 +132,21 @@ class Server(LineReceiver, TimeoutMixin):
             self.sendError(error, error_reason)
         self.transport.loseConnection()
 
-    def processCOMMIT(self):
-        pass
-
     def processABORT(self):
         (error, error_reason) = self.factory.abortTxn(self.txn)
         if error != 0:
             self.sendError(error, error_reason)
         else:
-            self.sendACK(self.txn)
+            self.sendACK()
 
+    def processCOMMIT(self):
+        (decision, error, details) = self.factory.commitTxn(self.txn, self.seq)
+        if decision == 'ACK':
+            self.sendACK()
+        elif decision == 'ERROR':
+            self.sendError(error, details)
+        elif decision == 'ASK_RESEND':
+            self.sendASK_RESEND(details)
 
 
 class ServerFactory(Factory):
@@ -221,20 +226,21 @@ class ServerFactory(Factory):
         return txn_id, 0, None
 
     def saveWrite(self, txn_id, seq, buf):
+        # Error checking
         if str(txn_id) not in self.txn_list:
             return (201, "Unknown transaction id.")
         else:
             txn_info = self.txn_list[str(txn_id)]
 
-        # TODO Test these
-        if txn_info['status'] == 'ABORT':
-            return (202, "Transaction has been aborted.")
-        elif txn_info['status'] == 'COMMIT':
-            return (202, "Transaction has been comitted already.")
-
         if seq < 0:
             return (204, "Sequence number has to be a positive integer.")
 
+        if txn_info['status'] == 'ABORT':
+            return (202, "Transaction has been aborted.")
+        elif txn_info['status'] == 'COMMIT': # TODO Test this
+            return (202, "Transaction has been comitted already.")
+
+        # Write to log
         txn_info['writes'][seq] = buf
         self.txn_list[str(txn_id)] = txn_info
         print self.txn_list
@@ -243,6 +249,7 @@ class ServerFactory(Factory):
         return 0, None
 
     def abortTxn(self, txn_id):
+        # Error checking
         if str(txn_id) not in self.txn_list:
             return (201, "Unknown transaction id.")
         else:
@@ -250,18 +257,48 @@ class ServerFactory(Factory):
 
         if txn_info['status'] == 'COMMIT':
             return (202, "Transaction has been comitted already.")
-        elif txn_info['status'] == 'NEW_TXN':
-            txn_info['status'] = 'ABORT'
+        
+        # Update status
+        txn_info['status'] = 'ABORT'
 
+        # Write to log, write out
         self.txn_list[str(txn_id)] = txn_info
         print self.txn_list
         self.txn_list.sync()
         return 0, None
 
-    def commitTxn(self):
-        pass
+    def commitTxn(self, txn_id, seq):
+        # Error checking
+        if str(txn_id) not in self.txn_list:
+            return ('ERROR', 201, "Unknown transaction id.")
+        else:
+            txn_info = self.txn_list[str(txn_id)]
+
+        if seq < 0:
+            return ('ERROR', 204, "Sequence number has to be a positive integer.")
+
+        if txn_info['status'] == 'ABORT':
+            return ('ERROR', 202, "Transaction has been aborted already.")
+        # If the transaction has been comitted already, don't check the sequence number
+        if txn_info['status'] == 'COMMIT':
+            return ('ACK', 0, None)
+
         # Check that have right number of things
-        # if all (str(k) in self.txn_list for k in range(seq)):
+        unsent = [k for k in range(seq) if k not in txn_info['writes']]
+        print 'unsent', unsent
+        if len (unsent) != 0:
+            return ('ASK_RESEND', 0, unsent)
+
+        # Write data to file
+
+
+        # Write to log, write out
+        txn_info['status'] = 'COMMIT'
+        self.txn_list[str(txn_id)] = txn_info
+        print self.txn_list
+        self.txn_list.sync()
+
+        return ('ACK', 0, None)
 
 
 def runserver():
