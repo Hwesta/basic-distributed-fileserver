@@ -1,0 +1,10 @@
+=== CMPT431 Assignment 2 ===
+=== A Distributed File System with Transactional Semantics ===
+=== By Holly Becker ===
+
+Language: Python
+Libraries: Twisted
+
+If the client sends multiple writes to the same transation with the same message sequence number, the old write will be replaced by the new write.
+If the client commits with few writes than it gave (eg. commit saying 4 write, but sent 5 messages), the higher numbered writes will be ignored.
+The server never forgets transactions.

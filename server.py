@@ -283,7 +283,7 @@ class ServerFactory(Factory):
             return ('ACK', 0, None)
 
         # Check that have right number of writes
-        unsent = [k for k in range(seq) if k not in txn_info['writes']]
+        unsent = [k for k in range(1,seq) if k not in txn_info['writes']]
         if len(unsent) != 0:
             return ('ASK_RESEND', 0, unsent)
 
@@ -309,11 +309,13 @@ class ServerFactory(Factory):
             f.flush()
             os.fsync(f.fileno())
             txn_info['status'] = 'COMMIT'
+            txn_info['write_committed'] = seq
 
             # Copy back
             shutil.move(lock_file, filename)
         except:
-            return ('ERROR', 205, "File IO error.  Check server settings and permissions.")
+            return ('ERROR', 205, 
+                    "File IO error.  Check server settings and permissions.")
         finally:
             try:
                 f.close()
