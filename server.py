@@ -13,6 +13,7 @@ import argparse
 import os
 import sys
 import errno
+import time
 import shelve  # For writing out dictionary
 import shutil  # For file copy
 
@@ -40,7 +41,7 @@ class Server(LineReceiver, TimeoutMixin):
             self.firstLine = False
             l = line.split()
             if len(l) != 4:
-                self.sendError(204, "Header is wrong length")
+                self.sendError(204, "Header has the wrong number of fields.")
                 return
             self.method, self.txn, self.seq, self.length = l
             try:
@@ -48,10 +49,10 @@ class Server(LineReceiver, TimeoutMixin):
                 self.seq = int(self.seq)
                 self.length = int(self.length)
             except ValueError:
-                self.sendError(204, "Header has non-numeric value")
+                self.sendError(204, "Header has non-numeric value.")
                 return
 
-            if seq < 0:
+            if self.seq < 0:
                 self.sendError(204,
                                "Sequence number has to be a positive integer.")
                 return
@@ -114,7 +115,7 @@ class Server(LineReceiver, TimeoutMixin):
         elif self.method == "ABORT":
             self.processABORT()
         else:
-            self.sendError(204, "Method does not exist")
+            self.sendError(204, "Method does not exist.")
 
     def processREAD(self):
         (error, buf) = self.factory.readFile(self.buf)
@@ -196,7 +197,7 @@ class ServerFactory(Factory):
 
     def readFile(self, file_name):
         if not os.path.isfile(file_name):
-            return (206, "File not found")
+            return (206, "File not found.")
 
         try:
             f = open(file_name, 'r')
@@ -295,13 +296,13 @@ class ServerFactory(Factory):
 
         # If the lock file exists, another transaction is comitting
         while os.path.isfile(lock_file):
-            print 'locked'
-            sleep(0.05)
+            print 'locked', txn_id
+            time.sleep(0.05)
 
         try:
             # Copy existing file to lock
             if os.path.isfile(filename):
-                shutil.copy2(new_file, lock_file)
+                shutil.copy2(filename, lock_file)
             # Write data
             f = open(lock_file, 'a')
             f.write(data)
@@ -312,10 +313,12 @@ class ServerFactory(Factory):
             # Copy back
             shutil.move(lock_file, filename)
         except:
-            return ('ERROR', 205,
-                    "File IO error.  Check server settings and permissions.")
+            return ('ERROR', 205, "File IO error.  Check server settings and permissions.")
         finally:
-            f.close()
+            try:
+                f.close()
+            except:
+                pass
             try:
                 os.remove(lock_file)
             except:
@@ -333,7 +336,7 @@ def runserver():
     # Parse arguments
     parser = argparse.ArgumentParser(description='Run a distributed fileserver.')
     parser.add_argument('-ip', default='127.0.0.1', help="Server IP.")
-    parser.add_argument('-port', default=8080, type=int, help="Server port")
+    parser.add_argument('-port', default=8080, type=int, help="Server port.")
     parser.add_argument('-dir', required=True, help='Directory to store files in.')
     args = parser.parse_args()
 
