@@ -337,9 +337,10 @@ class ServerFactory(Factory):
 def runserver():
     # Parse arguments
     parser = argparse.ArgumentParser(description='Run a distributed fileserver.')
-    parser.add_argument('-ip', default='127.0.0.1', help="Server IP.")
-    parser.add_argument('-port', default=8080, type=int, help="Server port.")
-    parser.add_argument('-dir', required=True, help='Directory to store files in.')
+    parser.add_argument('-ip', default='127.0.0.1', help="Server IP.  Defaults to 127.0.0.1")
+    parser.add_argument('-port', default=8080, type=int, help="Server port.  Defaults to 8080")
+    parser.add_argument('-dir', required=True, help='Directory to store files in.  Required.')
+    #parser.add_argument("-v", "--verbosity", action="count", help="Show debugging output.")
     args = parser.parse_args()
 
     reactor.listenTCP(args.port, ServerFactory(args.dir), interface=args.ip)
