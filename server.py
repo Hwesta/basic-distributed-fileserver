@@ -233,16 +233,21 @@ class ServerFactory(Factory):
         return (0, buf)
 
     def startNewTxn(self, new_file):
+        # Error checking
+        if os.path.isdir(new_file):
+            return (0, 205, "A directory with that name already exists.")
+        if new_file[0] == '.':
+            return (0, 205, "Creating hidden files is forbidden.")
+        if '/' in new_file:
+            return (0, 205, "Creating directories (or files in subdirectories) is forbidden.")
+
+        # New transaction information
         txn_id = self.txn_list['next_id']
         txn_info = {'file': new_file,
                     'status': 'NEW_TXN',
                     'writes': {},
                     'writes_committed': -1,
                     'start_time': time.time()}
-
-        # Directory with the same name - error
-        if os.path.isdir(new_file):
-            return (txn_id, 205, "A directory with that name already exists.")
 
         # Update log
         self.txn_list['next_id'] = txn_id + 1
