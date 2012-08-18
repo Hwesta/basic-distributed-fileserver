@@ -1,4 +1,4 @@
-#! /usr/bin/python2
+#! /usr/bin/python
 # TODO Remember to change this to python
 # -*- test-case-name: a2.test.test_server -*-
 

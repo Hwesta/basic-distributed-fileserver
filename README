@@ -68,3 +68,5 @@ Ba: If the client commits with fewer writes than it gave (eg. commit saying 4 wr
 
 Q24:
 The server never forgets transactions.
+
+Debugging output of the log file is printed to the console for each transaction.  It can be ignored, or used to confirm that messages have been processed correctly.
