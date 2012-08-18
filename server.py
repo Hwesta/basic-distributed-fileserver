@@ -14,6 +14,7 @@ import os
 import sys
 import errno
 import time
+import re
 import shelve  # For writing out dictionary
 import shutil  # For file copy
 
@@ -181,6 +182,12 @@ class ServerFactory(Factory):
                 print "Could not initialize server.  Does the directory have execute permission?"
                 sys.exit(-1)
 
+        # Delete lock files leftover from a crash
+        pattern = "^.lock-.*$"
+        for f in os.listdir(self.logdir):
+            if re.search(pattern, f):
+                os.remove(os.path.join(self.logdir, f))
+
         # If logs exist, read from disk
         self.logfile = self.logdir + "log"
         if os.path.isfile(self.logfile):
@@ -192,7 +199,18 @@ class ServerFactory(Factory):
         print 'Log:', self.txn_list
 
     def __del__(self):
+        # Abort transactions that were started more than 5 mins ago
         if self.txn_list is not None:
+            expire_time = 5*60  # 5 mins
+            for (txn_id, txn) in self.txn_list.items():
+                if (txn_id != 'next_id' and
+                    txn['status'] == 'NEW_TXN' and
+                    time.time() > txn['start_time'] + expire_time):
+
+                    txn_info = self.txn_list[str(txn_id)]
+                    txn_info['status'] = 'ABORT'
+                    self.txn_list[str(txn_id)] = txn_info
+
             self.txn_list.close()
 
     def readFile(self, file_name):
@@ -216,7 +234,11 @@ class ServerFactory(Factory):
 
     def startNewTxn(self, new_file):
         txn_id = self.txn_list['next_id']
-        txn_info = {'file': new_file, 'status': 'NEW_TXN', 'writes': {}}
+        txn_info = {'file': new_file,
+                    'status': 'NEW_TXN',
+                    'writes': {},
+                    'writes_committed': -1,
+                    'start_time': time.time()}
 
         # Directory with the same name - error
         if os.path.isdir(new_file):
@@ -309,7 +331,7 @@ class ServerFactory(Factory):
             f.flush()
             os.fsync(f.fileno())
             txn_info['status'] = 'COMMIT'
-            txn_info['write_committed'] = seq
+            txn_info['writes_committed'] = seq-1
 
             # Copy back
             shutil.move(lock_file, filename)

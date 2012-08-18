@@ -54,7 +54,13 @@ COMMIT = N+1
 Thus, in normal operation, the sequence number of each message increases by 1.
 
 Server-specific files are stored in DIRECTORY/.server_log/
-The log is written to DIRECTORY/.server_log/log
+The log is written to DIRECTORY/.server_log/log and is never removed.
+
+Transactions started over 5 minutes ago are marked as aborted when the server is shutdown.
+
+WRITE has no ACK.
+
+Behaviour if files in .server_log are modified is undefined.
 
 Q12:
 Aa: If the client sends multiple writes to the same transation with the same message sequence number, the old write will be replaced by the new write.
