@@ -237,9 +237,9 @@ class ServerFactory(Factory):
         if os.path.isdir(new_file):
             return (0, 205, "A directory with that name already exists.")
         if new_file[0] == '.':
-            return (0, 205, "Creating hidden files is forbidden.")
+            return (0, 202, "Creating hidden files is forbidden.")
         if '/' in new_file:
-            return (0, 205, "Creating directories (or files in subdirectories) is forbidden.")
+            return (0, 202, "Creating directories (or files in subdirectories) is forbidden.")
 
         # New transaction information
         txn_id = self.txn_list['next_id']
