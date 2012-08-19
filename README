@@ -1,0 +1,72 @@
+=== CMPT431 Assignment 2 ===
+=== A Distributed File System with Transactional Semantics ===
+=== By Holly Becker ===
+
+Language: Python
+Libraries: Twisted
+
+== Installation ==
+Python and Twisted are already installed on Ubuntu.
+Confirmed on nile.csil.sfu.ca with Ubuntu 11.04 on August 17, 2012
+
+== Running ==
+
+From the directory where server.py is located:
+$ python server.py -dir DIRECTORY
+
+== Example interaction ==
+
+--> Client
+NEW_TXN -1 0 8
+
+test.txt
+--> Server
+ACK 3 0 0 0
+
+
+--> Client
+WRITE 3 1 26
+
+The weather is hot today.
+--> Server
+--> Client
+COMMIT 3 2 0
+
+
+--> Server
+ACK 3 0 0 0
+
+
+--> Client
+READ 0 0 8
+
+test.txt
+--> Server
+The weather is hot today.
+--> Done
+
+== Implementation Clarifications ==
+
+Expected sequence numbers are
+NEW_TXN = 0
+WRITE = 1-N
+COMMIT = N+1
+Thus, in normal operation, the sequence number of each message increases by 1.
+
+Server-specific files are stored in DIRECTORY/.server_log/
+The log is written to DIRECTORY/.server_log/log and is never removed.
+
+Transactions started over 5 minutes ago are marked as aborted when the server is shutdown.
+
+WRITE has no ACK.
+
+Behaviour if files in .server_log are modified is undefined.
+
+Q12:
+Aa: If the client sends multiple writes to the same transation with the same message sequence number, the old write will be replaced by the new write.
+Ba: If the client commits with fewer writes than it gave (eg. commit saying 4 write, but sent 5 messages), the higher numbered writes will be ignored.
+
+Q24:
+The server never forgets transactions.
+
+Debugging output of the log file is printed to the console for each transaction.  It can be ignored, or used to confirm that messages have been processed correctly.
