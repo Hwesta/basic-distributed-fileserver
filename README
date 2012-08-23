@@ -25,12 +25,12 @@ ACK 3 0 0 0
 
 
 --> Client
-WRITE 3 1 26
+WRITE 3 0 26
 
 The weather is hot today.
 --> Server
 --> Client
-COMMIT 3 2 0
+COMMIT 3 1 0
 
 
 --> Server
@@ -49,9 +49,8 @@ The weather is hot today.
 
 Expected sequence numbers are
 NEW_TXN = 0
-WRITE = 1-N
+WRITE = 0-N
 COMMIT = N+1
-Thus, in normal operation, the sequence number of each message increases by 1.
 
 Server-specific files are stored in DIRECTORY/.server_log/
 The log is written to DIRECTORY/.server_log/log and is never removed.

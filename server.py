@@ -1,4 +1,4 @@
-#! /usr/bin/python
+#! /usr/bin/python2
 # TODO Remember to change this to python
 # -*- test-case-name: a2.test.test_server -*-
 
@@ -17,7 +17,9 @@ import time
 import re
 import shelve  # For writing out dictionary
 import shutil  # For file copy
+import hashlib
 
+verbosity = 0
 
 # Messages parsing modeled off of twisted.web.http HTTPClient and HTTPChannel
 class Server(LineReceiver, TimeoutMixin):
@@ -163,15 +165,45 @@ class ServerFactory(Factory):
     logdir = None
     logfile = None
     txn_list = None
+    file_list = {}
+    primary = None
+    role = None
 
-    def __init__(self, cwd):
-        # Check if directory exists
-        if not os.path.isdir(cwd):
-            print "Path %s does not exist or is not a directory." % cwd
+    # Run on server startup
+    def __init__(self, args):
+        # Check if working directory exists
+        if not os.path.isdir(args.dir):
+            print "Path %s does not exist or is not a directory." % args.dir
             sys.exit(-1)
         else:
-            os.chdir(cwd)
-        print "Working directory: ", cwd
+            os.chdir(args.dir)
+        if verbosity > 0:
+            print "Working directory: ", args.dir
+
+        # Primary shoudn't be a directory
+        if os.path.isdir(args.primary):
+            print "Primary.txt must point to a file, not a directory."
+            sys.exit(-1)
+
+        # Read primary.txt
+        try:
+            f = open(args.primary)
+        except:
+            print "Primary.txt could not be opened."
+            sys.exit(-1)
+
+        # Determine role based on that
+        l = f.readline()
+        try:
+            ip, port = l.split()
+            if ip == args.ip and port == str(args.port):
+                self.role = 'PRIMARY'
+            else:
+                self.role = 'SECONDARY'
+        except ValueError:
+            self.role = 'PRIMARY'
+        if verbosity > 1:
+            print "Role:", self.role
 
         # Create hidden log dir
         self.logdir = ".server_log/"
@@ -196,12 +228,32 @@ class ServerFactory(Factory):
             log = shelve.open(self.logfile)
             log['next_id'] = 1
         self.txn_list = log
-        print 'Log:', self.txn_list
+        if verbosity > 1:
+            print "Raw log:", self.txn_list
 
+        # Remove NEW_TXNs if secondary
+        # TODO check when need to forget NEW_TXNs
+        if self.role == "SECONDARY":
+            for (txn_id, txn) in self.txn_list.items():
+                if (txn_id != 'next_id' and txn['status'] == 'NEW_TXN'):
+                    del self.txn_list[str(txn_id)]
+        if verbosity > 0:
+            print 'Cleaned Log:', self.txn_list
+
+        # Create file list
+        hashs = [(f, hashlib.md5(open(f, 'r').read()).hexdigest()) for f in os.listdir('.') if not os.path.isdir(f) and f[0] != '.']
+        self.file_list = dict(hashs)
+        if verbosity > 1:
+            print "Hashes:", self.file_list
+
+        # If secondary, sync with primary
+
+
+    # Run on server shutdown
     def __del__(self):
         # Abort transactions that were started more than 5 mins ago
         if self.txn_list is not None:
-            expire_time = 5*60  # 5 mins
+            expire_time = 5*60
             for (txn_id, txn) in self.txn_list.items():
                 if (txn_id != 'next_id' and
                     txn['status'] == 'NEW_TXN' and
@@ -210,7 +262,6 @@ class ServerFactory(Factory):
                     txn_info = self.txn_list[str(txn_id)]
                     txn_info['status'] = 'ABORT'
                     self.txn_list[str(txn_id)] = txn_info
-
             self.txn_list.close()
 
     def readFile(self, file_name):
@@ -310,7 +361,7 @@ class ServerFactory(Factory):
             return ('ACK', 0, None)
 
         # Check that have right number of writes
-        unsent = [k for k in range(1,seq) if k not in txn_info['writes']]
+        unsent = [k for k in range(0,seq) if k not in txn_info['writes']]
         if len(unsent) != 0:
             return ('ASK_RESEND', 0, unsent)
 
@@ -363,14 +414,22 @@ class ServerFactory(Factory):
 
 def runserver():
     # Parse arguments
-    parser = argparse.ArgumentParser(description='Run a distributed fileserver.')
-    parser.add_argument('-ip', default='127.0.0.1', help="Server IP.  Defaults to 127.0.0.1")
-    parser.add_argument('-port', default=8080, type=int, help="Server port.  Defaults to 8080")
-    parser.add_argument('-dir', required=True, help='Directory to store files in.  Required.')
-    #parser.add_argument("-v", "--verbosity", action="count", help="Show debugging output.")
+    parser = argparse.ArgumentParser(description='Run a replicated fileserver.')
+    parser.add_argument('-ip', default='127.0.0.1',
+                        help="Server IP.  Defaults to 127.0.0.1")
+    parser.add_argument('-port', default=8080, type=int,
+                        help="Server port.  Defaults to 8080")
+    parser.add_argument('-dir', required=True,
+                        help='Directory to store files in.  Required.')
+    parser.add_argument('-primary','-p', required=True,
+                        help='Absolute path to primary.txt file.  Required.')
+    parser.add_argument("-v", "--verbosity", action="count", help="Show debugging output.")
     args = parser.parse_args()
 
-    reactor.listenTCP(args.port, ServerFactory(args.dir), interface=args.ip)
+    global verbosity
+    verbosity = args.verbosity
+
+    reactor.listenTCP(args.port, ServerFactory(args), interface=args.ip)
     reactor.run()
 
 # Start the server
