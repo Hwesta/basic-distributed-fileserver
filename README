@@ -1,5 +1,5 @@
-=== CMPT431 Assignment 2 ===
-=== A Distributed File System with Transactional Semantics ===
+=== CMPT431 Assignment 3 ===
+=== A Replicated File System with Transactional Semantics ===
 === By Holly Becker ===
 
 Language: Python
@@ -61,11 +61,17 @@ WRITE has no ACK.
 
 Behaviour if files in .server_log are modified is undefined.
 
-Q12:
+READ will only return the first 100K of data.
+
+A2 Q12:
 Aa: If the client sends multiple writes to the same transation with the same message sequence number, the old write will be replaced by the new write.
 Ba: If the client commits with fewer writes than it gave (eg. commit saying 4 write, but sent 5 messages), the higher numbered writes will be ignored.
 
-Q24:
+A2 Q24:
 The server never forgets transactions.
 
 Debugging output of the log file is printed to the console for each transaction.  It can be ignored, or used to confirm that messages have been processed correctly.
+
+New message when contacting secondary:
+
+

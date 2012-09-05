@@ -198,11 +198,14 @@ class ServerFactory(Factory):
             ip, port = l.split()
             if ip == args.ip and port == str(args.port):
                 self.role = 'PRIMARY'
+            # elif ip == 'localhost':
+            #     print "Cannot run on localhost.  Exiting."
+            #     sys.exit(-1)
             else:
                 self.role = 'SECONDARY'
         except ValueError:
             self.role = 'PRIMARY'
-        if verbosity > 1:
+        if verbosity > 0:
             print "Role:", self.role
 
         # Create hidden log dir
@@ -265,6 +268,8 @@ class ServerFactory(Factory):
             self.txn_list.close()
 
     def readFile(self, file_name):
+        if self.role == 'SECONDARY':
+            return (207, "This is the secondary.  Contact primary server.")
         if not os.path.isfile(file_name):
             return (206, "File not found.")
 
@@ -285,6 +290,8 @@ class ServerFactory(Factory):
 
     def startNewTxn(self, new_file):
         # Error checking
+        if self.role == 'SECONDARY':
+            return (0, 207, "This is the secondary.  Contact primary server.")
         if os.path.isdir(new_file):
             return (0, 205, "A directory with that name already exists.")
         if new_file[0] == '.':
@@ -313,6 +320,8 @@ class ServerFactory(Factory):
 
     def saveWrite(self, txn_id, seq, buf):
         # Error checking
+        if self.role == 'SECONDARY':
+            return (207, "This is the secondary.  Contact primary server.")
         if str(txn_id) not in self.txn_list:
             return (201, "Unknown transaction id.")
 
@@ -332,6 +341,8 @@ class ServerFactory(Factory):
 
     def abortTxn(self, txn_id):
         # Error checking
+        if self.role == 'SECONDARY':
+            return (207, "This is the secondary.  Contact primary server.")
         if str(txn_id) not in self.txn_list:
             return (201, "Unknown transaction id.")
         txn_info = self.txn_list[str(txn_id)]
@@ -351,6 +362,8 @@ class ServerFactory(Factory):
 
     def commitTxn(self, txn_id, seq):
         # Error checking
+        if self.role == 'SECONDARY':
+            return ('ERROR', 207, "This is the secondary.  Contact primary server.")
         if str(txn_id) not in self.txn_list:
             return ('ERROR', 201, "Unknown transaction id.")
         txn_info = self.txn_list[str(txn_id)]
