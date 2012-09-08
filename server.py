@@ -21,8 +21,26 @@ import hashlib
 
 verbosity = 0
 
+def parse_args():
+    parser = argparse.ArgumentParser(description='Run a replicated fileserver.')
+    parser.add_argument('-ip', default='127.0.0.1',
+                        help="Server IP.  Defaults to 127.0.0.1")
+    parser.add_argument('-port', default=8080, type=int,
+                        help="Server port.  Defaults to 8080")
+    parser.add_argument('-dir', required=True,
+                        help='Directory to store files in.  Required.')
+    parser.add_argument('-primary','-p', required=True,
+                        help='Absolute path to primary.txt file.  Required.')
+    parser.add_argument("-v", "--verbosity", action="count", help="Show debugging output.")
+    args = parser.parse_args()
+
+    global verbosity
+    verbosity = args.verbosity
+    return args
+
+
 # Messages parsing modeled off of twisted.web.http HTTPClient and HTTPChannel
-class Server(LineReceiver, TimeoutMixin):
+class FilesystemProtocol(LineReceiver, TimeoutMixin):
     """ Reads and parses a message for the distributed filesystem. """
     method = None
     txn = None
@@ -47,6 +65,7 @@ class Server(LineReceiver, TimeoutMixin):
                 self.sendError(204, "Header has the wrong number of fields.")
                 return
             self.method, self.txn, self.seq, self.length = l
+
             try:
                 self.txn = int(self.txn)
                 self.seq = int(self.seq)
@@ -59,7 +78,6 @@ class Server(LineReceiver, TimeoutMixin):
                 self.sendError(204,
                                "Sequence number has to be a positive integer.")
                 return
-
             return
         # No expected data, so process the message
         if not self.data:
@@ -159,9 +177,9 @@ class Server(LineReceiver, TimeoutMixin):
             self.sendASK_RESEND(details)
 
 
-class ServerFactory(Factory):
+class FilesystemFactory(Factory):
     """ Acts on parsed messages for distributed filesystem. """
-    protocol = Server
+    protocol = FilesystemProtocol
     logdir = None
     logfile = None
     txn_list = None
@@ -197,14 +215,14 @@ class ServerFactory(Factory):
         try:
             ip, port = l.split()
             if ip == args.ip and port == str(args.port):
-                self.role = 'PRIMARY'
+                self.becomePrimary()
             # elif ip == 'localhost':
             #     print "Cannot run on localhost.  Exiting."
             #     sys.exit(-1)
             else:
                 self.role = 'SECONDARY'
         except ValueError:
-            self.role = 'PRIMARY'
+            self.becomePrimary()
         if verbosity > 0:
             print "Role:", self.role
 
@@ -266,6 +284,9 @@ class ServerFactory(Factory):
                     txn_info['status'] = 'ABORT'
                     self.txn_list[str(txn_id)] = txn_info
             self.txn_list.close()
+
+    def becomePrimary(self):
+        self.role = 'PRIMARY'
 
     def readFile(self, file_name):
         if self.role == 'SECONDARY':
@@ -425,26 +446,14 @@ class ServerFactory(Factory):
         return ('ACK', 0, None)
 
 
-def runserver():
-    # Parse arguments
-    parser = argparse.ArgumentParser(description='Run a replicated fileserver.')
-    parser.add_argument('-ip', default='127.0.0.1',
-                        help="Server IP.  Defaults to 127.0.0.1")
-    parser.add_argument('-port', default=8080, type=int,
-                        help="Server port.  Defaults to 8080")
-    parser.add_argument('-dir', required=True,
-                        help='Directory to store files in.  Required.')
-    parser.add_argument('-primary','-p', required=True,
-                        help='Absolute path to primary.txt file.  Required.')
-    parser.add_argument("-v", "--verbosity", action="count", help="Show debugging output.")
-    args = parser.parse_args()
+def main():
+    args = parse_args()
 
-    global verbosity
-    verbosity = args.verbosity
+    factory = FilesystemFactory(args)
 
-    reactor.listenTCP(args.port, ServerFactory(args), interface=args.ip)
+    reactor.listenTCP(args.port, factory, interface=args.ip)
     reactor.run()
 
 # Start the server
 if __name__ == '__main__':
-    runserver()
+    main()
