@@ -180,16 +180,19 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
 class FilesystemFactory(Factory):
     """ Acts on parsed messages for distributed filesystem. """
     protocol = FilesystemProtocol
-    logdir = None
-    logfile = None
+    logdir = ".server_log/"
+    logfile = self.logdir+"log"
+    lock_prefix = ".lock-"
     txn_list = None
     file_list = {}
     primary = None
     role = None
+    ip = None
+    port = None
 
     # Run on server startup
-    def __init__(self, args):
-        # Check if working directory exists
+    def __init__(self,args):
+        # Change working directory, if it exists
         if not os.path.isdir(args.dir):
             print "Path %s does not exist or is not a directory." % args.dir
             sys.exit(-1)
@@ -198,36 +201,18 @@ class FilesystemFactory(Factory):
         if verbosity > 0:
             print "Working directory: ", args.dir
 
-        # Primary shoudn't be a directory
+        # Set path to primary.txt, if not at directory
         if os.path.isdir(args.primary):
             print "Primary.txt must point to a file, not a directory."
             sys.exit(-1)
+        else:
+            self.primary = args.primary
 
-        # Read primary.txt
-        try:
-            f = open(args.primary)
-        except:
-            print "Primary.txt could not be opened."
-            sys.exit(-1)
+        self.ip = args.ip
+        self.port = args.port
 
-        # Determine role based on that
-        l = f.readline()
-        try:
-            ip, port = l.split()
-            if ip == args.ip and port == str(args.port):
-                self.becomePrimary()
-            # elif ip == 'localhost':
-            #     print "Cannot run on localhost.  Exiting."
-            #     sys.exit(-1)
-            else:
-                self.role = 'SECONDARY'
-        except ValueError:
-            self.becomePrimary()
-        if verbosity > 0:
-            print "Role:", self.role
-
-        # Create hidden log dir
-        self.logdir = ".server_log/"
+    def startFactory(self):
+        # Create log directory
         try:
             os.makedirs(self.logdir)
         except OSError as exception:
@@ -236,13 +221,12 @@ class FilesystemFactory(Factory):
                 sys.exit(-1)
 
         # Delete lock files leftover from a crash
-        pattern = "^.lock-.*$"
+        pattern = "^"+self.lock_prefix+".*$"
         for f in os.listdir(self.logdir):
             if re.search(pattern, f):
                 os.remove(os.path.join(self.logdir, f))
 
         # If logs exist, read from disk
-        self.logfile = self.logdir + "log"
         if os.path.isfile(self.logfile):
             log = shelve.open(self.logfile)
         else:
@@ -252,26 +236,34 @@ class FilesystemFactory(Factory):
         if verbosity > 1:
             print "Raw log:", self.txn_list
 
-        # Remove NEW_TXNs if secondary
-        # TODO check when need to forget NEW_TXNs
-        if self.role == "SECONDARY":
-            for (txn_id, txn) in self.txn_list.items():
-                if (txn_id != 'next_id' and txn['status'] == 'NEW_TXN'):
-                    del self.txn_list[str(txn_id)]
+        self.hashFiles()
+
+        # Read primary.txt
+        try:
+            f = open(self.primary)
+        except:
+            print "Primary.txt could not be opened."
+            sys.exit(-1)
+
+        # Determine role from primary.txt
+        l = f.readline()
+        try:
+            ip, port = l.split()
+            if ip == self.ip and port == str(self.port):
+                self.becomePrimary()
+            # elif ip == 'localhost':
+            #     print "Cannot run on localhost.  Exiting."
+            #     sys.exit(-1)
+            else:
+                self.becomeSecondary()
+        except ValueError:
+            self.becomePrimary()
         if verbosity > 0:
-            print 'Cleaned Log:', self.txn_list
-
-        # Create file list
-        hashs = [(f, hashlib.md5(open(f, 'r').read()).hexdigest()) for f in os.listdir('.') if not os.path.isdir(f) and f[0] != '.']
-        self.file_list = dict(hashs)
-        if verbosity > 1:
-            print "Hashes:", self.file_list
-
-        # If secondary, sync with primary
+            print "Role:", self.role
 
 
     # Run on server shutdown
-    def __del__(self):
+    def stopFactory(self):
         # Abort transactions that were started more than 5 mins ago
         if self.txn_list is not None:
             expire_time = 5*60
@@ -285,8 +277,31 @@ class FilesystemFactory(Factory):
                     self.txn_list[str(txn_id)] = txn_info
             self.txn_list.close()
 
+    def hashFiles(self):
+        """  Create and hash files known by the server. """
+        hashs = [(f, hashlib.md5(open(f, 'r').read()).hexdigest()) for f in os.listdir('.') if not os.path.isdir(f) and f[0] != '.']
+        self.file_list = dict(hashs)
+        if verbosity > 1:
+            print "Hashes:", self.file_list
+
+
     def becomePrimary(self):
+        """ Switch role to primary server. """
         self.role = 'PRIMARY'
+
+    def becomeSecondary(self):
+        """ Set up secondary server. """
+        self.role = 'SECONDARY'
+
+        # Remove NEW_TXNs if secondary
+        # TODO check when need to forget NEW_TXNs
+        for (txn_id, txn) in self.txn_list.items():
+            if (txn_id != 'next_id' and txn['status'] == 'NEW_TXN'):
+                del self.txn_list[str(txn_id)]
+        if verbosity > 0:
+            print 'Cleaned Log:', self.txn_list
+
+        # If secondary, sync with primary
 
     def readFile(self, file_name):
         if self.role == 'SECONDARY':
@@ -402,7 +417,7 @@ class FilesystemFactory(Factory):
         # Write to the file
 
         filename = txn_info['file']
-        lock_file = self.logdir + ".lock-" + filename  # Make this a hash??
+        lock_file = self.logdir + self.lock_prefix + filename  # Make this a hash??
         data = "".join(
             [txn_info['writes'][k] for k in txn_info['writes'] if k < seq])
 
