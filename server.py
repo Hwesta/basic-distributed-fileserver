@@ -3,7 +3,7 @@
 # -*- test-case-name: a2.test.test_server -*-
 
 # Twisted - networking library
-from twisted.internet.protocol import Factory
+from twisted.internet.protocol import ServerFactory, ClientFactory, ClientCreator
 from twisted.protocols.basic import LineReceiver
 from twisted.protocols.policies import TimeoutMixin
 from twisted.internet import reactor
@@ -18,6 +18,7 @@ import re
 import shelve  # For writing out dictionary
 import shutil  # For file copy
 import hashlib
+import json
 
 verbosity = 0
 
@@ -39,9 +40,86 @@ def parse_args():
     return args
 
 
+class SyncProtocol(LineReceiver):
+    """
+    Reads and parses a message to the secondary server.
+
+    Send: NEW_SEC, READ, heartbeat??
+    Format:
+    -> METHOD txn_id seq length
+    ->
+    -> buf
+
+    Receive: SYNC_FILES, file contents,
+    Format:
+    -> METHOD length
+    ->
+    -> file_list
+    """
+
+    service = None
+    message_type = None
+    firstLine = True
+    method = None
+    length = None
+    buf = None
+
+    def __init__(self, service):
+        self.service = service
+
+    def sendNEW_SEC(self, files):
+        self.message_type = "NEW_SEC"
+        msg = "NEW_SEC 0 0 %d\r\n\r\n%s\r\n" % (len(files), files)
+        self.transport.write(msg)
+
+    def lineReceived(self, line):
+        if self.firstLine:
+            self.firstLine = False
+            l = line.split()
+            self.method, length = l
+            self.length = int(length)
+            return
+
+        if not line:
+            self.buf = ""
+            self.setRawMode()  # Data arrives at rawDataReceived
+
+    def rawDataReceived(self, data):
+        if self.length is not None:
+            data = data[:self.length]
+            self.buf += data
+            self.length -= len(data)
+        if self.length == 0:
+            self.processMessage()
+
+    def processMessage(self):
+        self.transport.loseConnection()
+        self.service.getPrimaryFiles(self.buf)
+
+
 # Messages parsing modeled off of twisted.web.http HTTPClient and HTTPChannel
 class FilesystemProtocol(LineReceiver, TimeoutMixin):
-    """ Reads and parses a message for the distributed filesystem. """
+    """
+    Reads and parses a message to the primary server.
+
+    Receive: NEW_TXN, WRITE, ABORT, COMMIT, READ, NEW_SEC
+    Format:
+    -> METHOD txn_id seq length
+    ->
+    -> buf
+
+    Send: ERROR, ACK, ASK_RESEND
+    Format:
+    -> METHOD txn_id seq error_num length
+    ->
+    -> error_reason
+
+    Send: SYNC_FILES
+    Format:
+    -> METHOD length
+    ->
+    -> file_list
+    """
     method = None
     txn = None
     seq = None
@@ -65,7 +143,6 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
                 self.sendError(204, "Header has the wrong number of fields.")
                 return
             self.method, self.txn, self.seq, self.length = l
-
             try:
                 self.txn = int(self.txn)
                 self.seq = int(self.seq)
@@ -123,6 +200,11 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
             self.transport.write(resend)
         self.transport.loseConnection()
 
+    def sendSYNC_FILES(self, files):
+        msg = "SYNC_FILES %d\r\n\r\n%s\r\n" % (len(files), files)
+        self.transport.write(msg)
+        self.transport.loseConnection()
+
     def processMessage(self):
         self.setTimeout(None)
         if self.method == "READ":
@@ -135,11 +217,13 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
             self.processCOMMIT()
         elif self.method == "ABORT":
             self.processABORT()
+        elif self.method == "NEW_SEC":
+            self.processNEW_SEC()
         else:
             self.sendError(204, "Method does not exist.")
 
     def processREAD(self):
-        (error, buf) = self.factory.readFile(self.buf)
+        (error, buf) = self.factory.service.readFile(self.buf)
         if error != 0:
             self.sendError(error, buf)
         else:
@@ -147,7 +231,7 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
             self.transport.loseConnection()
 
     def processNEW_TXN(self):
-        (txn_id, error, error_reason) = self.factory.startNewTxn(self.buf)
+        (txn_id, error, error_reason) = self.factory.service.startNewTxn(self.buf)
         if error != 0:
             self.sendError(error, error_reason)
         else:
@@ -155,20 +239,20 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
             self.sendACK()
 
     def processWRITE(self):
-        (error, error_reason) = self.factory.saveWrite(self.txn, self.seq, self.buf)
+        (error, error_reason) = self.factory.service.saveWrite(self.txn, self.seq, self.buf)
         if error != 0:
             self.sendError(error, error_reason)
         self.transport.loseConnection()
 
     def processABORT(self):
-        (error, error_reason) = self.factory.abortTxn(self.txn)
+        (error, error_reason) = self.factory.service.abortTxn(self.txn)
         if error != 0:
             self.sendError(error, error_reason)
         else:
             self.sendACK()
 
     def processCOMMIT(self):
-        (decision, error, details) = self.factory.commitTxn(self.txn, self.seq)
+        (decision, error, details) = self.factory.service.commitTxn(self.txn, self.seq)
         if decision == 'ACK':
             self.sendACK()
         elif decision == 'ERROR':
@@ -176,22 +260,33 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
         elif decision == 'ASK_RESEND':
             self.sendASK_RESEND(details)
 
+    def processNEW_SEC(self):
+        peer = self.transport.getPeer()
+        if verbosity > 2:
+            print "Files from secondary:", self.buf
+        files = self.factory.service.addSecondary(peer.host, peer.port, self.buf)
+        if verbosity > 1:
+            print 'Differing files:', files
+        if files is not None:
+            self.sendSYNC_FILES(files)
 
-class FilesystemFactory(Factory):
-    """ Acts on parsed messages for distributed filesystem. """
-    protocol = FilesystemProtocol
+class FilesystemService():
+    """ Provides the filesystem functionality: writes and logs transactions. """
+
     logdir = ".server_log/"
-    logfile = self.logdir+"log"
+    logfile = logdir+"log"
     lock_prefix = ".lock-"
     txn_list = None
     file_list = {}
-    primary = None
+    primary_txt = None
     role = None
     ip = None
     port = None
+    primary = None
+    secondaries = None
 
     # Run on server startup
-    def __init__(self,args):
+    def __init__(self, args):
         # Change working directory, if it exists
         if not os.path.isdir(args.dir):
             print "Path %s does not exist or is not a directory." % args.dir
@@ -206,12 +301,11 @@ class FilesystemFactory(Factory):
             print "Primary.txt must point to a file, not a directory."
             sys.exit(-1)
         else:
-            self.primary = args.primary
+            self.primary_txt = args.primary
 
         self.ip = args.ip
         self.port = args.port
 
-    def startFactory(self):
         # Create log directory
         try:
             os.makedirs(self.logdir)
@@ -240,7 +334,7 @@ class FilesystemFactory(Factory):
 
         # Read primary.txt
         try:
-            f = open(self.primary)
+            f = open(self.primary_txt)
         except:
             print "Primary.txt could not be opened."
             sys.exit(-1)
@@ -249,21 +343,21 @@ class FilesystemFactory(Factory):
         l = f.readline()
         try:
             ip, port = l.split()
-            if ip == self.ip and port == str(self.port):
+            port = int(port)
+            if ip == self.ip and port == self.port:
                 self.becomePrimary()
             # elif ip == 'localhost':
             #     print "Cannot run on localhost.  Exiting."
             #     sys.exit(-1)
             else:
-                self.becomeSecondary()
+                self.becomeSecondary((ip,port))
         except ValueError:
             self.becomePrimary()
-        if verbosity > 0:
-            print "Role:", self.role
-
+        finally:
+            f.close()
 
     # Run on server shutdown
-    def stopFactory(self):
+    def __del__(self):
         # Abort transactions that were started more than 5 mins ago
         if self.txn_list is not None:
             expire_time = 5*60
@@ -288,10 +382,24 @@ class FilesystemFactory(Factory):
     def becomePrimary(self):
         """ Switch role to primary server. """
         self.role = 'PRIMARY'
+        if verbosity > 0:
+            print "Role:", self.role
 
-    def becomeSecondary(self):
+        self.secondaries = set()
+
+        if verbosity > 0:
+            print 'Log:', self.txn_list
+
+
+    def becomeSecondary(self, primary):
         """ Set up secondary server. """
         self.role = 'SECONDARY'
+        if verbosity > 0:
+            print "Role:", self.role
+
+        self.primary = primary
+        if verbosity > 0:
+            print "Primary:", primary
 
         # Remove NEW_TXNs if secondary
         # TODO check when need to forget NEW_TXNs
@@ -302,6 +410,52 @@ class FilesystemFactory(Factory):
             print 'Cleaned Log:', self.txn_list
 
         # If secondary, sync with primary
+        connection = ClientCreator(reactor, SyncProtocol, self)
+        host, port = self.primary
+        deferred = connection.connectTCP(host, port)
+        deferred.addCallbacks(self.initialFileSync, self.becomePrimary)
+
+    def initialFileSync(self, protocol):
+        if verbosity > 1:
+            print "Secondary's files:", self.file_list
+        j = json.dumps(self.file_list)
+        protocol.sendNEW_SEC(j)
+
+    def addSecondary(self, host, port, files):
+        """ 
+        Given files and hashes from secondary, return files that differ.
+
+        Called from FilesystemProtocol.processNEW_SEC
+        """
+        self.secondaries.add((host,port))
+        # Compare given files with own files
+        sec_files = json.loads(files)
+        diff_files = {}
+
+        for local_file in self.file_list:
+            if local_file not in sec_files or \
+                self.file_list[local_file] != sec_files[local_file]:
+                diff_files[local_file] = None
+
+        j = json.dumps(diff_files)
+        return j
+
+    def getPrimaryFiles(self, files):
+        """
+        Requests files from primary that the secondary needs to sync.
+
+        Called from SyncProtocol.processMessage
+        """
+        print "files to sync:", files
+        # TODO request files
+        # TODO rework this to use deferreds?
+    #     connection = ClientCreator(reactor, SyncProtocol, self)
+    #     host, port = self.primary
+    #     deferred = connection.connectTCP(host, port)
+    #     deferred.addCallbacks(self.initialFileSync, self.becomePrimary)
+
+    # def requestFiles(self, protocol):
+    #     protocol.sendREADs()
 
     def readFile(self, file_name):
         if self.role == 'SECONDARY':
@@ -326,8 +480,6 @@ class FilesystemFactory(Factory):
 
     def startNewTxn(self, new_file):
         # Error checking
-        if self.role == 'SECONDARY':
-            return (0, 207, "This is the secondary.  Contact primary server.")
         if os.path.isdir(new_file):
             return (0, 205, "A directory with that name already exists.")
         if new_file[0] == '.':
@@ -356,8 +508,6 @@ class FilesystemFactory(Factory):
 
     def saveWrite(self, txn_id, seq, buf):
         # Error checking
-        if self.role == 'SECONDARY':
-            return (207, "This is the secondary.  Contact primary server.")
         if str(txn_id) not in self.txn_list:
             return (201, "Unknown transaction id.")
 
@@ -377,8 +527,6 @@ class FilesystemFactory(Factory):
 
     def abortTxn(self, txn_id):
         # Error checking
-        if self.role == 'SECONDARY':
-            return (207, "This is the secondary.  Contact primary server.")
         if str(txn_id) not in self.txn_list:
             return (201, "Unknown transaction id.")
         txn_info = self.txn_list[str(txn_id)]
@@ -398,8 +546,6 @@ class FilesystemFactory(Factory):
 
     def commitTxn(self, txn_id, seq):
         # Error checking
-        if self.role == 'SECONDARY':
-            return ('ERROR', 207, "This is the secondary.  Contact primary server.")
         if str(txn_id) not in self.txn_list:
             return ('ERROR', 201, "Unknown transaction id.")
         txn_info = self.txn_list[str(txn_id)]
@@ -464,9 +610,13 @@ class FilesystemFactory(Factory):
 def main():
     args = parse_args()
 
-    factory = FilesystemFactory(args)
+    service = FilesystemService(args)
 
-    reactor.listenTCP(args.port, factory, interface=args.ip)
+    primary_factory = ServerFactory()
+    primary_factory.protocol = FilesystemProtocol
+    primary_factory.service = service
+
+    reactor.listenTCP(args.port, primary_factory, interface=args.ip)
     reactor.run()
 
 # Start the server
