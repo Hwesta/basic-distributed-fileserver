@@ -139,6 +139,10 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
     ->
     -> error_reason
 
+    Send: file contents
+    Format:
+    -> file_contents
+
     Send: SYNC_FILES
     Format:
     -> METHOD length
@@ -307,7 +311,7 @@ class FilesystemService():
     file_list = {}
     primary_txt = None
     role = None
-    ip = None
+    host = None
     port = None
     primary = None
     secondaries = None
@@ -330,7 +334,7 @@ class FilesystemService():
         else:
             self.primary_txt = args.primary
 
-        self.ip = args.ip
+        self.host = args.ip
         self.port = args.port
 
         # Create log directory
@@ -369,15 +373,15 @@ class FilesystemService():
         # Determine role from primary.txt
         l = f.readline()
         try:
-            ip, port = l.split()
+            host, port = l.split()
             port = int(port)
-            if ip == self.ip and port == self.port:
+            if host == self.host and port == self.port:
                 self.becomePrimary()
-            # elif ip == 'localhost':
+            # elif host == 'localhost':
             #     print "Cannot run on localhost.  Exiting."
             #     sys.exit(-1)
             else:
-                self.becomeSecondary((ip,port))
+                self.becomeSecondary((host,port))
         except ValueError:
             self.becomePrimary()
         finally:
@@ -399,38 +403,50 @@ class FilesystemService():
             self.txn_list.close()
 
     def hashFiles(self):
-        """  Create and hash files known by the server. """
-        hashs = [(f, hashlib.md5(open(f, 'r').read()).hexdigest()) for f in os.listdir('.') if not os.path.isdir(f) and f[0] != '.']
+        """
+        Returns a dictionary of filenames and their hashes known to the server.
+        """
+        hashs = [(f, hashlib.md5(open(f, 'r').read()).hexdigest())
+                 for f in os.listdir('.')
+                 if not os.path.isdir(f) and f[0] != '.'
+                 ]
         self.file_list = dict(hashs)
         if verbosity > 1:
             print "Hashes:", self.file_list
 
-
     def becomePrimary(self):
-        """ Switch role to primary server. """
+        """
+        Become primary server. Run by secondary to switch roles, or on boot.
+        """
         self.role = 'PRIMARY'
-        if verbosity > 0:
-            print "Role:", self.role
-
+        self.primary = None
         self.secondaries = set()
 
+        # Write to primary.txt
+        with open(self.primary_txt, 'w') as f:
+            buf = "%s %d" % (self.host, self.port)
+            print 'writing to primary.txt', buf
+            f.write(buf)
+
         if verbosity > 0:
+            print "Role:", self.role
             print 'Log:', self.txn_list
 
     def connectToPrimary(self):
+        """ Establish connection from secondary to primary. Return Deferred. """
         connection = ClientCreator(reactor, SyncProtocol)
         host, port = self.primary
         d = connection.connectTCP(host, port)
         return d
 
     def becomeSecondary(self, primary):
-        """ Set up secondary server. """
+        """ Become secondary server.  Run on boot. """
         self.role = 'SECONDARY'
+        self.secondaries = None
+        self.primary = primary
+
         if verbosity > 0:
             print "Role:", self.role
-
-        self.primary = primary
-        if verbosity > 0:
             print "Primary:", primary
 
         # Remove NEW_TXNs if secondary
@@ -439,7 +455,7 @@ class FilesystemService():
             if (txn_id != 'next_id' and txn['status'] == 'NEW_TXN'):
                 del self.txn_list[str(txn_id)]
         if verbosity > 0:
-            print 'Cleaned Log:', self.txn_list
+            print 'Log:', self.txn_list
 
         # Sync with primary
         d = self.connectToPrimary()
@@ -447,7 +463,10 @@ class FilesystemService():
         d.addCallback(self.announceSecondary)
 
     def announceSecondary(self, protocol):
-        """ Called by secondary once connection established with the primary. """
+        """
+        Announce self as secondary to primary server.  Called by secondary
+        once connection established with the primary.
+        """
         if verbosity > 1:
             print "SEC files:", self.file_list
         j = json.dumps(self.file_list)
@@ -457,9 +476,7 @@ class FilesystemService():
 
     def addSecondary(self, host, port, files):
         """ 
-        Given files and hashes from secondary, return files that differ.
-
-        Called from FilesystemProtocol.processNEW_SEC
+        Return files that differ from local giles, given a list of files.
         """
         self.secondaries.add((host,port))
         if verbosity > 0:
@@ -482,8 +499,6 @@ class FilesystemService():
     def getPrimaryFiles(self, json_files):
         """
         Requests files from primary that the secondary needs to sync.
-
-        Called from SyncProtocol.processMessage
         """
         files = json.loads(json_files)
         files = map(str, files)
@@ -493,13 +508,17 @@ class FilesystemService():
             d = self.connectToPrimary()
             # TODO add errback
             d.addCallback(self.requestFile, f)
+        else:
+            print "SEC no files to get"
 
     def requestFile(self, protocol, fname):
+        """ Send READ request for fname. """
         d = protocol.sendREAD(fname)
         # TODO add errback
         d.addCallback(self.saveFile)
 
     def saveFile(self, (fname, buf)):
+        """ (Over)write fname with buf. """
         if verbosity > 2:
             print "SEC writing file:", fname
             print "SEC writing data:", buf
@@ -508,12 +527,14 @@ class FilesystemService():
 
 
     def readFile(self, file_name):
+        """ Read file_name. """
         if self.role == 'SECONDARY':
             return (207, "This is the secondary.  Contact primary server.")
         if not os.path.isfile(file_name):
             return (206, "File not found.")
         if verbosity > 1:
             print "READ", file_name
+
         try:
             f = open(file_name, 'r')
         except:
@@ -530,6 +551,7 @@ class FilesystemService():
         return (0, buf)
 
     def startNewTxn(self, new_file):
+        """ Create and log a new transaction on new_file. """
         # Error checking
         if os.path.isdir(new_file):
             return (0, 205, "A directory with that name already exists.")
@@ -558,6 +580,7 @@ class FilesystemService():
         return (txn_id, 0, None)
 
     def saveWrite(self, txn_id, seq, buf):
+        """ Add a write to txn_id identified by seq with data buf. """
         # Error checking
         if str(txn_id) not in self.txn_list:
             return (201, "Unknown transaction id.")
@@ -577,6 +600,7 @@ class FilesystemService():
         return (0, None)
 
     def abortTxn(self, txn_id):
+        """ Abort transaction identified by txn_id. """
         # Error checking
         if str(txn_id) not in self.txn_list:
             return (201, "Unknown transaction id.")
@@ -596,6 +620,7 @@ class FilesystemService():
         return (0, None)
 
     def commitTxn(self, txn_id, seq):
+        """ Commit transaction identified by txn_id. """
         # Error checking
         if str(txn_id) not in self.txn_list:
             return ('ERROR', 201, "Unknown transaction id.")
@@ -619,6 +644,7 @@ class FilesystemService():
             [txn_info['writes'][k] for k in txn_info['writes'] if k < seq])
 
         # If the lock file exists, another transaction is comitting
+        # TODO Use deferred here
         while os.path.isfile(lock_file):
             print 'locked', txn_id
             time.sleep(0.05)
