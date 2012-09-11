@@ -84,20 +84,21 @@ class SyncProtocol(LineReceiver):
     def lineReceived(self, line):
         if verbosity > 3:
             print 'SyncProtocol rcv:', line
+        # Many assumptions about incoming data, since from server
         if self.firstLine:
             self.firstLine = False
             l = line.split()
             if l[0] == "ERROR":
                 self.transport.loseConnection()
-                # TOOD handle errors
-                # self.deferred.errback(reason)
+                d, self.deferred = self.deferred, None
+                d.errback()
             self.method, length = l
             self.length = int(length)
             return
 
         if not line:
             self.buf = ""
-            self.setRawMode()  # Data arrives at rawDataReceived
+            self.setRawMode()
 
     def rawDataReceived(self, data):
         if self.length is None:
@@ -108,7 +109,6 @@ class SyncProtocol(LineReceiver):
             self.length -= len(data)
         if self.length == 0:
             self.transport.loseConnection()
-            self.processMessage()
 
     def connectionLost(self, reason):
         self.processMessage()
@@ -307,14 +307,18 @@ class FilesystemService():
     logdir = ".server_log/"
     logfile = logdir+"log"
     lock_prefix = ".lock-"
+
     txn_list = None
     file_list = {}
     primary_txt = None
+
     role = None
+    primary = None  # None if this is the primary
+    secondaries = None  # None if this is a secondary
+    listen = None  # None if this is the primary
+
     host = None
     port = None
-    primary = None
-    secondaries = None
 
     # Run on server startup
     def __init__(self, args):
@@ -432,18 +436,20 @@ class FilesystemService():
             print "Role:", self.role
             print 'Log:', self.txn_list
 
-    def connectToPrimary(self):
-        """ Establish connection from secondary to primary. Return Deferred. """
-        connection = ClientCreator(reactor, SyncProtocol)
-        host, port = self.primary
-        d = connection.connectTCP(host, port)
-        return d
+        # Start listening
+        factory = ServerFactory()
+        factory.protocol = FilesystemProtocol
+        factory.service = self
+        self.listen = reactor.listenTCP(self.port, factory, interface=self.host)
 
     def becomeSecondary(self, primary):
         """ Become secondary server.  Run on boot. """
         self.role = 'SECONDARY'
         self.secondaries = None
         self.primary = primary
+        if self.listen is not None:
+            self.listen.stopListening()
+            self.listen = None
 
         if verbosity > 0:
             print "Role:", self.role
@@ -458,9 +464,25 @@ class FilesystemService():
             print 'Log:', self.txn_list
 
         # Sync with primary
-        d = self.connectToPrimary()
+        d = self.connectToPrimary(bind=True)
         # TODO add errback
-        d.addCallback(self.announceSecondary)
+        d.addCallbacks(self.announceSecondary, self.lostPrimary)
+
+    def connectToPrimary(self, bind=False):
+        """ Establish connection from secondary to primary. Return Deferred. """
+        connection = ClientCreator(reactor, SyncProtocol)
+        host, port = self.primary
+        if bind == True:
+            d = connection.connectTCP(host, port,
+                                      bindAddress=(self.host, self.port))
+        else:
+            d = connection.connectTCP(host, port)
+        return d
+
+    def lostPrimary(self, reason):
+        if verbosity > 0:
+            print "SEC cannot see primary.  Becoming primary."
+        self.becomePrimary()
 
     def announceSecondary(self, protocol):
         """
@@ -508,8 +530,6 @@ class FilesystemService():
             d = self.connectToPrimary()
             # TODO add errback
             d.addCallback(self.requestFile, f)
-        else:
-            print "SEC no files to get"
 
     def requestFile(self, protocol, fname):
         """ Send READ request for fname. """
@@ -528,8 +548,6 @@ class FilesystemService():
 
     def readFile(self, file_name):
         """ Read file_name. """
-        if self.role == 'SECONDARY':
-            return (207, "This is the secondary.  Contact primary server.")
         if not os.path.isfile(file_name):
             return (206, "File not found.")
         if verbosity > 1:
@@ -689,11 +707,6 @@ def main():
 
     service = FilesystemService(args)
 
-    primary_factory = ServerFactory()
-    primary_factory.protocol = FilesystemProtocol
-    primary_factory.service = service
-
-    reactor.listenTCP(args.port, primary_factory, interface=args.ip)
     reactor.run()
 
 # Start the server
