@@ -6,7 +6,7 @@
 from twisted.internet.protocol import ServerFactory, ClientFactory, ClientCreator
 from twisted.protocols.basic import LineReceiver
 from twisted.protocols.policies import TimeoutMixin
-from twisted.internet import reactor
+from twisted.internet import reactor, defer
 
 # Other
 import argparse
@@ -56,26 +56,41 @@ class SyncProtocol(LineReceiver):
     ->
     -> file_list
     """
-
-    service = None
     message_type = None
     firstLine = True
     method = None
     length = None
+    save_data = None
     buf = None
-
-    def __init__(self, service):
-        self.service = service
+    deferred = None
 
     def sendNEW_SEC(self, files):
         self.message_type = "NEW_SEC"
         msg = "NEW_SEC 0 0 %d\r\n\r\n%s\r\n" % (len(files), files)
         self.transport.write(msg)
+        self.deferred = defer.Deferred()
+        return self.deferred
+
+    def sendREAD(self, fname):
+        self.message_type = "READ"
+        self.save_data = fname
+        msg = "READ 0 0 %d\r\n\r\n%s\r\n" % (len(fname), fname)
+        self.transport.write(msg)
+        self.buf = ""
+        self.setRawMode()
+        self.deferred = defer.Deferred()
+        return self.deferred
 
     def lineReceived(self, line):
+        if verbosity > 3:
+            print 'SyncProtocol rcv:', line
         if self.firstLine:
             self.firstLine = False
             l = line.split()
+            if l[0] == "ERROR":
+                self.transport.loseConnection()
+                # TOOD handle errors
+                # self.deferred.errback(reason)
             self.method, length = l
             self.length = int(length)
             return
@@ -85,16 +100,26 @@ class SyncProtocol(LineReceiver):
             self.setRawMode()  # Data arrives at rawDataReceived
 
     def rawDataReceived(self, data):
+        if self.length is None:
+            self.buf += data
         if self.length is not None:
             data = data[:self.length]
             self.buf += data
             self.length -= len(data)
         if self.length == 0:
+            self.transport.loseConnection()
             self.processMessage()
 
+    def connectionLost(self, reason):
+        self.processMessage()
+
     def processMessage(self):
-        self.transport.loseConnection()
-        self.service.getPrimaryFiles(self.buf)
+        if self.deferred is not None:
+            d, self.deferred = self.deferred, None
+            if self.save_data is not None:
+                d.callback((self.save_data, self.buf))
+            else:
+                d.callback(self.buf)
 
 
 # Messages parsing modeled off of twisted.web.http HTTPClient and HTTPChannel
@@ -135,6 +160,8 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
         self.setTimeout(None)
 
     def lineReceived(self, line):
+        if verbosity > 3:
+            print 'FilesystemProtocol rcv:', line
         self.resetTimeout()
         if self.firstLine:
             self.firstLine = False
@@ -390,6 +417,11 @@ class FilesystemService():
         if verbosity > 0:
             print 'Log:', self.txn_list
 
+    def connectToPrimary(self):
+        connection = ClientCreator(reactor, SyncProtocol)
+        host, port = self.primary
+        d = connection.connectTCP(host, port)
+        return d
 
     def becomeSecondary(self, primary):
         """ Set up secondary server. """
@@ -409,17 +441,19 @@ class FilesystemService():
         if verbosity > 0:
             print 'Cleaned Log:', self.txn_list
 
-        # If secondary, sync with primary
-        connection = ClientCreator(reactor, SyncProtocol, self)
-        host, port = self.primary
-        deferred = connection.connectTCP(host, port)
-        deferred.addCallbacks(self.initialFileSync, self.becomePrimary)
+        # Sync with primary
+        d = self.connectToPrimary()
+        # TODO add errback
+        d.addCallback(self.announceSecondary)
 
-    def initialFileSync(self, protocol):
+    def announceSecondary(self, protocol):
+        """ Called by secondary once connection established with the primary. """
         if verbosity > 1:
-            print "Secondary's files:", self.file_list
+            print "SEC files:", self.file_list
         j = json.dumps(self.file_list)
-        protocol.sendNEW_SEC(j)
+        d = protocol.sendNEW_SEC(j)
+        # TODO add errback
+        d.addCallback(self.getPrimaryFiles)
 
     def addSecondary(self, host, port, files):
         """ 
@@ -428,6 +462,9 @@ class FilesystemService():
         Called from FilesystemProtocol.processNEW_SEC
         """
         self.secondaries.add((host,port))
+        if verbosity > 0:
+            print "PRI added secondary", host, port
+
         # Compare given files with own files
         sec_files = json.loads(files)
         diff_files = {}
@@ -437,32 +474,46 @@ class FilesystemService():
                 self.file_list[local_file] != sec_files[local_file]:
                 diff_files[local_file] = None
 
+        if verbosity > 1:
+            print "PRI differing files:", diff_files
         j = json.dumps(diff_files)
         return j
 
-    def getPrimaryFiles(self, files):
+    def getPrimaryFiles(self, json_files):
         """
         Requests files from primary that the secondary needs to sync.
 
         Called from SyncProtocol.processMessage
         """
-        print "files to sync:", files
-        # TODO request files
-        # TODO rework this to use deferreds?
-    #     connection = ClientCreator(reactor, SyncProtocol, self)
-    #     host, port = self.primary
-    #     deferred = connection.connectTCP(host, port)
-    #     deferred.addCallbacks(self.initialFileSync, self.becomePrimary)
+        files = json.loads(json_files)
+        files = map(str, files)
+        if verbosity > 1:
+            print "SEC getting files:", files
+        for f in files:
+            d = self.connectToPrimary()
+            # TODO add errback
+            d.addCallback(self.requestFile, f)
 
-    # def requestFiles(self, protocol):
-    #     protocol.sendREADs()
+    def requestFile(self, protocol, fname):
+        d = protocol.sendREAD(fname)
+        # TODO add errback
+        d.addCallback(self.saveFile)
+
+    def saveFile(self, (fname, buf)):
+        if verbosity > 2:
+            print "SEC writing file:", fname
+            print "SEC writing data:", buf
+        with open(fname, 'w') as f:
+            f.write(buf)
+
 
     def readFile(self, file_name):
         if self.role == 'SECONDARY':
             return (207, "This is the secondary.  Contact primary server.")
         if not os.path.isfile(file_name):
             return (206, "File not found.")
-
+        if verbosity > 1:
+            print "READ", file_name
         try:
             f = open(file_name, 'r')
         except:
