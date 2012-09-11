@@ -465,7 +465,6 @@ class FilesystemService():
 
         # Sync with primary
         d = self.connectToPrimary(bind=True)
-        # TODO add errback
         d.addCallbacks(self.announceSecondary, self.lostPrimary)
 
     def connectToPrimary(self, bind=False):
@@ -493,7 +492,7 @@ class FilesystemService():
             print "SEC files:", self.file_list
         j = json.dumps(self.file_list)
         d = protocol.sendNEW_SEC(j)
-        # TODO add errback
+        # TODO add errback - but it should never errback here!!
         d.addCallback(self.getPrimaryFiles)
 
     def addSecondary(self, host, port, files):
@@ -528,13 +527,12 @@ class FilesystemService():
             print "SEC getting files:", files
         for f in files:
             d = self.connectToPrimary()
-            # TODO add errback
-            d.addCallback(self.requestFile, f)
+            d.addCallbacks(self.requestFile, callbackArgs=f,
+                           errback=self.lostPrimary)
 
     def requestFile(self, protocol, fname):
         """ Send READ request for fname. """
         d = protocol.sendREAD(fname)
-        # TODO add errback
         d.addCallback(self.saveFile)
 
     def saveFile(self, (fname, buf)):
