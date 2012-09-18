@@ -141,27 +141,30 @@ class Heartbeat(DatagramProtocol, TimeoutMixin):
         "Called after all transport is teared down"
         self.setTimeout(None)
 
-    def datagramReceived(self, data, (host,port)):
-        print "HB received %r from %s:%d" % (data, host, port)
+    def datagramReceived(self, data, __):
         if data != self.msg:
+            if verbosity > 3:
+                print "Heartbeat received %r" % data
             if self.expect_rcv:
                 self.resetTimeout()
-                print 'reset'
+                if verbosity > 3:
+                    print 'Heartbeat reset timeout'
             else:
                 self.setTimeout(2.5)  # seconds
                 self.expect_rcv = True
-                print 'set timout'
+                if verbosity > 3:
+                    print 'Heartbeat started timeout'
 
     def timeoutConnection(self):
-        print 'HB timeout cxn'
+        if verbosity > 2:
+            print 'Heartbeat timeout connection'
         self.expect_rcv = False
         if self.deferred is not None:
             new_d = defer.Deferred()
             d, self.deferred = self.deferred, new_d
-            d.callback(("No Heartbeat", new_d))
+            d.callback((new_d,))
 
     def sendHeartBeat(self):
-        print 'send heartbeat'
         self.transport.write(self.msg, ("228.0.0.5", 8005))
 
 
@@ -500,10 +503,7 @@ class FilesystemService():
         reactor.listenTCP(self.port, factory, interface=self.host)
 
         # Setup heartbeat
-        if self.heartbeatd is None:
-            self.heartbeatd = defer.Deferred()
-            protocol = Heartbeat(self.host+":"+self.port, self.heartbeatd)
-            reactor.listenMulticast(8005, protocol, listenMultiple=True)
+        self.setupHeartbeat()
         self.heartbeatd.addCallback(self.removeSecondary)
 
 
@@ -530,13 +530,10 @@ class FilesystemService():
 
         # Sync with primary
         d = self.connectToPrimary(bind=True)
-        d.addCallbacks(self.announceSecondary, self.lostPrimary)
+        d.addCallbacks(self.announceSecondary, self.couldNotConnect)
 
-        # Setup heartbeat
-        self.heartbeatd = defer.Deferred()
-        protocol = Heartbeat(self.host+":"+self.port, self.heartbeatd)
+        self.setupHeartbeat()
         self.heartbeatd.addCallback(self.lostPrimary)
-        reactor.listenMulticast(8005, protocol,listenMultiple=True)
 
 
     def connectToPrimary(self, bind=False):
@@ -550,9 +547,21 @@ class FilesystemService():
             d = connection.connectTCP(host, port)
         return d
 
-    def lostPrimary(self, (reason, d)):
+    def couldNotConnect(self, reason):
         if verbosity > 0:
-            print "SEC cannot see primary. (%s) Becoming primary." % reason
+            print "SEC Could not connect to primary. (%s) Becoming primary." % reason
+        self.becomePrimary()
+
+    def setupHeartbeat(self):
+        if self.heartbeatd is None:
+            self.heartbeatd = defer.Deferred()
+            msg = "%s:%d" % (self.host, self.port)
+            protocol = Heartbeat(msg, self.heartbeatd)
+            reactor.listenMulticast(8005, protocol, listenMultiple=True)
+
+    def lostPrimary(self, (d,)):
+        if verbosity > 0:
+            print "SEC heartbeat failed. Becoming primary."
         self.heartbeatd = d
         self.becomePrimary()
 
@@ -590,7 +599,7 @@ class FilesystemService():
         j = json.dumps(diff_files)
         return j
 
-    def removeSecondary(self, (reason, d)):
+    def removeSecondary(self, (d,)):
         if verbosity > 0:
             print "PRI removing secondary"  # host, port
         # TODO do this properly
