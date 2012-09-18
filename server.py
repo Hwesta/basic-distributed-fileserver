@@ -3,9 +3,10 @@
 # -*- test-case-name: a2.test.test_server -*-
 
 # Twisted - networking library
-from twisted.internet.protocol import ServerFactory, ClientFactory, ClientCreator
+from twisted.internet.protocol import ServerFactory, ClientFactory, ClientCreator, DatagramProtocol
 from twisted.protocols.basic import LineReceiver
 from twisted.protocols.policies import TimeoutMixin
+from twisted.internet.task import LoopingCall
 from twisted.internet import reactor, defer
 
 # Other
@@ -120,6 +121,48 @@ class SyncProtocol(LineReceiver):
                 d.callback((self.save_data, self.buf))
             else:
                 d.callback(self.buf)
+
+class Heartbeat(DatagramProtocol, TimeoutMixin):
+    # Primary server
+
+    def __init__(self, msg, d):
+        self.msg = msg
+        self.loopObj = None
+        self.deferred = d
+        self.expect_rcv = False
+
+    def startProtocol(self):
+        "Called when transport is connected"
+        self.transport.joinGroup("228.0.0.5")
+        self.loopObj = LoopingCall(self.sendHeartBeat)
+        self.loopObj.start(1, now=False)
+
+    def stopProtocol(self):
+        "Called after all transport is teared down"
+        self.setTimeout(None)
+
+    def datagramReceived(self, data, (host,port)):
+        print "HB received %r from %s:%d" % (data, host, port)
+        if data != self.msg:
+            if self.expect_rcv:
+                self.resetTimeout()
+                print 'reset'
+            else:
+                self.setTimeout(2.5)  # seconds
+                self.expect_rcv = True
+                print 'set timout'
+
+    def timeoutConnection(self):
+        print 'HB timeout cxn'
+        self.expect_rcv = False
+        if self.deferred is not None:
+            new_d = defer.Deferred()
+            d, self.deferred = self.deferred, new_d
+            d.callback(("No Heartbeat", new_d))
+
+    def sendHeartBeat(self):
+        print 'send heartbeat'
+        self.transport.write(self.msg, ("228.0.0.5", 8005))
 
 
 # Messages parsing modeled off of twisted.web.http HTTPClient and HTTPChannel
@@ -315,10 +358,10 @@ class FilesystemService():
     role = None
     primary = None  # None if this is the primary
     secondaries = None  # None if this is a secondary
-    listen = None  # None if this is the primary
 
     host = None
     port = None
+    heartbeatd = None  # Deferred passed to heartbeat
 
     # Run on server startup
     def __init__(self, args):
@@ -365,8 +408,6 @@ class FilesystemService():
         if verbosity > 1:
             print "Raw log:", self.txn_list
 
-        self.hashFiles()
-
         # Read primary.txt
         try:
             f = open(self.primary_txt)
@@ -408,7 +449,7 @@ class FilesystemService():
 
     def hashFiles(self):
         """
-        Returns a dictionary of filenames and their hashes known to the server.
+        Generates a dictionary of filenames and their hashes known to the server.
         """
         # from http://stackoverflow.com/questions/1131220/get-md5-hash-of-a-files-without-open-it-in-python
         # def md5_for_file(f, block_size=2**20):
@@ -431,9 +472,16 @@ class FilesystemService():
         """
         Become primary server. Run by secondary to switch roles, or on boot.
         """
-        self.role = 'PRIMARY'
+        if self.role == 'PRIMARY':
+            print 'ERR tried to become primary twice'
+            return
+        # Cleanup from being secondary, if applicable
         self.primary = None
+        # Become primary
+        self.role = 'PRIMARY'
         self.secondaries = set()
+
+        self.hashFiles()
 
         # Write to primary.txt
         with open(self.primary_txt, 'w') as f:
@@ -449,20 +497,28 @@ class FilesystemService():
         factory = ServerFactory()
         factory.protocol = FilesystemProtocol
         factory.service = self
-        self.listen = reactor.listenTCP(self.port, factory, interface=self.host)
+        reactor.listenTCP(self.port, factory, interface=self.host)
+
+        # Setup heartbeat
+        if self.heartbeatd is None:
+            self.heartbeatd = defer.Deferred()
+            protocol = Heartbeat(self.host+":"+self.port, self.heartbeatd)
+            reactor.listenMulticast(8005, protocol, listenMultiple=True)
+        self.heartbeatd.addCallback(self.removeSecondary)
+
 
     def becomeSecondary(self, primary):
         """ Become secondary server.  Run on boot. """
+        if self.role != None:
+            print "ERROR: Becoming secondary, previous roles %s" % self.role
         self.role = 'SECONDARY'
-        self.secondaries = None
         self.primary = primary
-        if self.listen is not None:
-            self.listen.stopListening()
-            self.listen = None
 
         if verbosity > 0:
             print "Role:", self.role
             print "Primary:", primary
+
+        self.hashFiles()
 
         # Remove NEW_TXNs if secondary
         # TODO check when need to forget NEW_TXNs
@@ -476,6 +532,13 @@ class FilesystemService():
         d = self.connectToPrimary(bind=True)
         d.addCallbacks(self.announceSecondary, self.lostPrimary)
 
+        # Setup heartbeat
+        self.heartbeatd = defer.Deferred()
+        protocol = Heartbeat(self.host+":"+self.port, self.heartbeatd)
+        self.heartbeatd.addCallback(self.lostPrimary)
+        reactor.listenMulticast(8005, protocol,listenMultiple=True)
+
+
     def connectToPrimary(self, bind=False):
         """ Establish connection from secondary to primary. Return Deferred. """
         connection = ClientCreator(reactor, SyncProtocol)
@@ -487,9 +550,10 @@ class FilesystemService():
             d = connection.connectTCP(host, port)
         return d
 
-    def lostPrimary(self, reason):
+    def lostPrimary(self, (reason, d)):
         if verbosity > 0:
-            print "SEC cannot see primary.  Becoming primary."
+            print "SEC cannot see primary. (%s) Becoming primary." % reason
+        self.heartbeatd = d
         self.becomePrimary()
 
     def announceSecondary(self, protocol):
@@ -506,7 +570,7 @@ class FilesystemService():
 
     def addSecondary(self, host, port, files):
         """ 
-        Return files that differ from local giles, given a list of files.
+        Return files that differ from local files, given a list of files.
         """
         self.secondaries.add((host,port))
         if verbosity > 0:
@@ -526,6 +590,14 @@ class FilesystemService():
         j = json.dumps(diff_files)
         return j
 
+    def removeSecondary(self, (reason, d)):
+        if verbosity > 0:
+            print "PRI removing secondary"  # host, port
+        # TODO do this properly
+        self.secondaries = set()
+        self.heartbeatd = d
+        self.heartbeatd.addCallback(self.removeSecondary)
+
     def getPrimaryFiles(self, json_files):
         """
         Requests files from primary that the secondary needs to sync.
@@ -536,8 +608,9 @@ class FilesystemService():
             print "SEC getting files:", files
         for f in files:
             d = self.connectToPrimary()
-            d.addCallbacks(self.requestFile, callbackArgs=f,
-                           errback=self.lostPrimary)
+            d.addCallback(self.requestFile, f)
+            d.addErrback(self.lostPrimary)
+
 
     def requestFile(self, protocol, fname):
         """ Send READ request for fname. """
