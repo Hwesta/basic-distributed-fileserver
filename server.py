@@ -65,9 +65,10 @@ class SyncProtocol(LineReceiver):
     buf = None
     deferred = None
 
-    def sendNEW_SEC(self, files):
+    def sendNEW_SEC(self, host, port, files):
         self.message_type = "NEW_SEC"
-        msg = "NEW_SEC 0 0 %d\r\n\r\n%s\r\n" % (len(files), files)
+        buf = "%s %d\r\n%s" % (host, port, files)
+        msg = "NEW_SEC 0 0 %d\r\n\r\n%s\r\n" % (len(buf), buf)
         self.transport.write(msg)
         self.deferred = defer.Deferred()
         return self.deferred
@@ -338,14 +339,15 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
             self.sendASK_RESEND(details)
 
     def processNEW_SEC(self):
-        peer = self.transport.getPeer()
+        (peer, files) = self.buf.split('\r\n', 1)
+        (host, port) = peer.split()
         if verbosity > 2:
-            print "Files from secondary:", self.buf
-        files = self.factory.service.addSecondary(peer.host, peer.port, self.buf)
+            print "Files from secondary:", files
+        diff_files = self.factory.service.addSecondary(host, int(port), files)
         if verbosity > 1:
-            print 'Differing files:', files
-        if files is not None:
-            self.sendSYNC_FILES(files)
+            print 'Differing files:', diff_files
+        if diff_files is not None:
+            self.sendSYNC_FILES(diff_files)
 
 class FilesystemService():
     """ Provides the filesystem functionality: writes and logs transactions. """
@@ -529,22 +531,18 @@ class FilesystemService():
             print 'Log:', self.txn_list
 
         # Sync with primary
-        d = self.connectToPrimary(bind=True)
+        d = self.connectToPrimary()
         d.addCallbacks(self.announceSecondary, self.couldNotConnect)
 
         self.setupHeartbeat()
         self.heartbeatd.addCallback(self.lostPrimary)
 
 
-    def connectToPrimary(self, bind=False):
+    def connectToPrimary(self):
         """ Establish connection from secondary to primary. Return Deferred. """
         connection = ClientCreator(reactor, SyncProtocol)
         host, port = self.primary
-        if bind == True:
-            d = connection.connectTCP(host, port,
-                                      bindAddress=(self.host, self.port))
-        else:
-            d = connection.connectTCP(host, port)
+        d = connection.connectTCP(host, port)
         return d
 
     def couldNotConnect(self, reason):
@@ -573,7 +571,7 @@ class FilesystemService():
         if verbosity > 1:
             print "SEC files:", self.file_list
         j = json.dumps(self.file_list)
-        d = protocol.sendNEW_SEC(j)
+        d = protocol.sendNEW_SEC(self.host, self.port, j)
         # TODO add errback - but it should never errback here!!
         d.addCallback(self.getPrimaryFiles)
 
