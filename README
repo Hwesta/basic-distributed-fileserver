@@ -12,7 +12,7 @@ Confirmed on nile.csil.sfu.ca with Ubuntu 11.04 on August 17, 2012
 == Running ==
 
 From the directory where server.py is located:
-$ python server.py -dir DIRECTORY
+$ python server.py -dir DIRECTORY -ip IP -port PORT -primary PATH_TO_PRIMARY
 
 == Example interaction ==
 
@@ -59,7 +59,7 @@ Transactions started over 5 minutes ago are marked as aborted when the server is
 
 WRITE has no ACK.
 
-Behaviour if files in .server_log are modified is undefined.
+Behaviour if primary.txt or files in .server_log are modified is undefined.
 
 READ will only return the first 100K of data.
 
@@ -72,8 +72,8 @@ Ba: If the client commits with fewer writes than it gave (eg. commit saying 4 wr
 A2 Q24:
 The server never forgets transactions.
 
-Debugging output of the log file is printed to the console for each transaction.  It can be ignored, or used to confirm that messages have been processed correctly.
+Debugging output can be printed by using -v though -vvvv
 
-New message when contacting secondary:
+The secondary rejects incoming TCP connections from the client.
 
 
