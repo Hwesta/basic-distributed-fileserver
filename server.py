@@ -41,6 +41,52 @@ def parse_args():
     return args
 
 
+class Heartbeat(DatagramProtocol, TimeoutMixin):
+    # Primary server
+
+    def __init__(self, msg, d):
+        self.msg = msg
+        self.loopObj = None
+        self.deferred = d
+        self.expect_rcv = False
+
+    def startProtocol(self):
+        "Called when transport is connected"
+        self.transport.joinGroup("228.0.0.5")
+        self.loopObj = LoopingCall(self.sendHeartBeat)
+        self.loopObj.start(1, now=False)
+
+    def stopProtocol(self):
+        "Called after all transport is teared down"
+        self.setTimeout(None)
+
+    def datagramReceived(self, data, __):
+        if data != self.msg:
+            if verbosity > 3:
+                print "Heartbeat received %r" % data
+            if self.expect_rcv:
+                self.resetTimeout()
+                if verbosity > 3:
+                    print 'Heartbeat reset timeout'
+            else:
+                self.setTimeout(2.5)  # seconds
+                self.expect_rcv = True
+                if verbosity > 3:
+                    print 'Heartbeat started timeout'
+
+    def timeoutConnection(self):
+        if verbosity > 2:
+            print 'Heartbeat timeout connection'
+        self.expect_rcv = False
+        if self.deferred is not None:
+            new_d = defer.Deferred()
+            d, self.deferred = self.deferred, new_d
+            d.callback((new_d,))
+
+    def sendHeartBeat(self):
+        self.transport.write(self.msg, ("228.0.0.5", 8005))
+
+
 class SyncProtocol(LineReceiver):
     """
     Reads and parses a message to the secondary server.
@@ -122,51 +168,6 @@ class SyncProtocol(LineReceiver):
                 d.callback((self.save_data, self.buf))
             else:
                 d.callback(self.buf)
-
-class Heartbeat(DatagramProtocol, TimeoutMixin):
-    # Primary server
-
-    def __init__(self, msg, d):
-        self.msg = msg
-        self.loopObj = None
-        self.deferred = d
-        self.expect_rcv = False
-
-    def startProtocol(self):
-        "Called when transport is connected"
-        self.transport.joinGroup("228.0.0.5")
-        self.loopObj = LoopingCall(self.sendHeartBeat)
-        self.loopObj.start(1, now=False)
-
-    def stopProtocol(self):
-        "Called after all transport is teared down"
-        self.setTimeout(None)
-
-    def datagramReceived(self, data, __):
-        if data != self.msg:
-            if verbosity > 3:
-                print "Heartbeat received %r" % data
-            if self.expect_rcv:
-                self.resetTimeout()
-                if verbosity > 3:
-                    print 'Heartbeat reset timeout'
-            else:
-                self.setTimeout(2.5)  # seconds
-                self.expect_rcv = True
-                if verbosity > 3:
-                    print 'Heartbeat started timeout'
-
-    def timeoutConnection(self):
-        if verbosity > 2:
-            print 'Heartbeat timeout connection'
-        self.expect_rcv = False
-        if self.deferred is not None:
-            new_d = defer.Deferred()
-            d, self.deferred = self.deferred, new_d
-            d.callback((new_d,))
-
-    def sendHeartBeat(self):
-        self.transport.write(self.msg, ("228.0.0.5", 8005))
 
 
 # Messages parsing modeled off of twisted.web.http HTTPClient and HTTPChannel
@@ -348,6 +349,7 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
             print 'Differing files:', diff_files
         if diff_files is not None:
             self.sendSYNC_FILES(diff_files)
+
 
 class FilesystemService():
     """ Provides the filesystem functionality: writes and logs transactions. """
@@ -618,7 +620,6 @@ class FilesystemService():
             d.addCallback(self.requestFile, f)
             d.addErrback(self.lostPrimary)
 
-
     def requestFile(self, protocol, fname):
         """ Send READ request for fname. """
         d = protocol.sendREAD(fname)
@@ -631,7 +632,6 @@ class FilesystemService():
             print "SEC writing data:", buf
         with open(fname, 'w') as f:
             f.write(buf)
-
 
     def readFile(self, file_name):
         """ Read file_name. """
