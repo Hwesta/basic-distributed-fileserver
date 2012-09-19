@@ -764,7 +764,7 @@ class FilesystemService():
             f.flush()
             os.fsync(f.fileno())
             txn_info['status'] = 'COMMIT'
-            txn_info['writes_committed'] = seq-1
+            txn_info['writes_committed'] = seq
 
             # Copy back
             shutil.move(lock_file, filename)
@@ -784,6 +784,8 @@ class FilesystemService():
         # Write to log, write out
         self.txn_list[str(txn_id)] = txn_info
         self.txn_list.sync()
+
+        self.file_list[filename] = hashlib.md5(open(filename, 'r').read()).hexdigest()
 
         print 'Log:', self.txn_list
         return ('ACK', 0, None)
