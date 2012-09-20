@@ -3,7 +3,7 @@
 # -*- test-case-name: a2.test.test_server -*-
 
 # Twisted - networking library
-from twisted.internet.protocol import ServerFactory, ClientFactory, ClientCreator, DatagramProtocol
+from twisted.internet.protocol import ServerFactory, ClientCreator, DatagramProtocol
 from twisted.protocols.basic import LineReceiver
 from twisted.protocols.policies import TimeoutMixin
 from twisted.internet.task import LoopingCall
@@ -91,19 +91,29 @@ class SyncProtocol(LineReceiver):
     """
     Reads and parses a message to the secondary server.
 
-    Send: NEW_SEC, READ, heartbeat??
+    Send: NEW_SEC, READ, TXN_LOG, COMMIT_TXN
     Format:
     -> METHOD txn_id seq length
     ->
     -> buf
 
-    Receive: SYNC_FILES, file contents,
+    Receive: SYNC_FILES
     Format:
     -> METHOD length
     ->
     -> file_list
+
+    Receive: ACK, ERROR
+    Format:
+    -> METHOD txn_id seq error_num length
+    ->
+    -> error_reason
+
+    Receive: file contents
+    Format:
+    -> file_contents    
     """
-    message_type = None
+
     firstLine = True
     method = None
     length = None
@@ -112,7 +122,6 @@ class SyncProtocol(LineReceiver):
     deferred = None
 
     def sendNEW_SEC(self, host, port, files):
-        self.message_type = "NEW_SEC"
         buf = "%s %d\r\n%s" % (host, port, files)
         msg = "NEW_SEC 0 0 %d\r\n\r\n%s\r\n" % (len(buf), buf)
         self.transport.write(msg)
@@ -120,12 +129,25 @@ class SyncProtocol(LineReceiver):
         return self.deferred
 
     def sendREAD(self, fname):
-        self.message_type = "READ"
         self.save_data = fname
         msg = "READ 0 0 %d\r\n\r\n%s\r\n" % (len(fname), fname)
         self.transport.write(msg)
         self.buf = ""
         self.setRawMode()
+        self.deferred = defer.Deferred()
+        return self.deferred
+
+    def sendTXN_LOG(self, txn_id, log):
+        self.save_data = txn_id
+        msg = "TXN_LOG %d 0 %d\r\n\r\n%s\r\n" % (txn_id, len(log), log)
+        self.transport.write(msg)
+        self.deferred = defer.Deferred()
+        return self.deferred
+
+    def sendCOMMIT_TXN(self, txn_id, num_writes):
+        self.save_data = txn_id
+        msg = "COMMIT_TXN %s %s 0\r\n\r\n\r\n" % (txn_id, num_writes)
+        self.transport.write(msg)
         self.deferred = defer.Deferred()
         return self.deferred
 
@@ -135,6 +157,7 @@ class SyncProtocol(LineReceiver):
         # Many assumptions about incoming data, since from server
         if self.firstLine:
             self.firstLine = False
+
             l = line.split()
             if l[0] == "ERROR":
                 self.transport.loseConnection()
@@ -142,6 +165,7 @@ class SyncProtocol(LineReceiver):
                 d.errback()
             self.method, length = l
             self.length = int(length)
+            # self.length = int(l[1])
             return
 
         if not line:
@@ -169,13 +193,12 @@ class SyncProtocol(LineReceiver):
             else:
                 d.callback(self.buf)
 
-
 # Messages parsing modeled off of twisted.web.http HTTPClient and HTTPChannel
 class FilesystemProtocol(LineReceiver, TimeoutMixin):
     """
     Reads and parses a message to the primary server.
 
-    Receive: NEW_TXN, WRITE, ABORT, COMMIT, READ, NEW_SEC
+    Receive: NEW_TXN, WRITE, ABORT, COMMIT, READ, NEW_SEC, TXN_LOG, COMMIT_TXN
     Format:
     -> METHOD txn_id seq length
     ->
@@ -298,6 +321,10 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
             self.processABORT()
         elif self.method == "NEW_SEC":
             self.processNEW_SEC()
+        elif self.method == "TXN_LOG":
+            self.processTXN_LOG()
+        elif self.method == "COMMIT_TXN":
+            self.processCOMMIT_TXN()
         else:
             self.sendError(204, "Method does not exist.")
 
@@ -350,6 +377,12 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
         if diff_files is not None:
             self.sendSYNC_FILES(diff_files)
 
+    def processTXN_LOG(self):
+        print 'rcv TXN_LOG', self.txn, self.buf
+
+    def processCOMMIT_TXN(self):
+        print 'rcv COMMIT_TXN', self.txn, self.seq
+
 
 class FilesystemService():
     """ Provides the filesystem functionality: writes and logs transactions. """
@@ -364,11 +397,13 @@ class FilesystemService():
 
     role = None
     primary = None  # None if this is the primary
-    secondaries = None  # None if this is a secondary
+    secondary = None  # None if this is a secondary
 
     host = None
     port = None
     heartbeatd = None  # Deferred passed to heartbeat
+    sync_port = None  # Port the secondary listens on for syncing
+    sync_factory = None  # Link to factory for syncing
 
     # Run on server startup
     def __init__(self, args):
@@ -439,6 +474,14 @@ class FilesystemService():
         finally:
             f.close()
 
+        # Start listening
+        factory = ServerFactory()
+        factory.protocol = FilesystemProtocol
+        factory.service = self
+        reactor.listenTCP(self.port, factory, interface=self.host)
+
+
+
     # Run on server shutdown
     def __del__(self):
         # Abort transactions that were started more than 5 mins ago
@@ -486,7 +529,7 @@ class FilesystemService():
         self.primary = None
         # Become primary
         self.role = 'PRIMARY'
-        self.secondaries = set()
+        self.secondary = None
 
         self.hashFiles()
 
@@ -499,12 +542,6 @@ class FilesystemService():
         if verbosity > 0:
             print "Role:", self.role
             print 'Log:', self.txn_list
-
-        # Start listening
-        factory = ServerFactory()
-        factory.protocol = FilesystemProtocol
-        factory.service = self
-        reactor.listenTCP(self.port, factory, interface=self.host)
 
         # Setup heartbeat
         self.setupHeartbeat()
@@ -533,17 +570,17 @@ class FilesystemService():
             print 'Log:', self.txn_list
 
         # Sync with primary
-        d = self.connectToPrimary()
+        d = self.connectToServer(self.primary)
         d.addCallbacks(self.announceSecondary, self.couldNotConnect)
 
+        # Setup heartbeat
         self.setupHeartbeat()
         self.heartbeatd.addCallback(self.lostPrimary)
 
 
-    def connectToPrimary(self):
+    def connectToServer(self, (host,port)):
         """ Establish connection from secondary to primary. Return Deferred. """
         connection = ClientCreator(reactor, SyncProtocol)
-        host, port = self.primary
         d = connection.connectTCP(host, port)
         return d
 
@@ -581,7 +618,7 @@ class FilesystemService():
         """ 
         Return files that differ from local files, given a list of files.
         """
-        self.secondaries.add((host,port))
+        self.secondary = (host,port)
         if verbosity > 0:
             print "PRI added secondary", host, port
 
@@ -603,7 +640,7 @@ class FilesystemService():
         if verbosity > 0:
             print "PRI removing secondary"  # host, port
         # TODO do this properly
-        self.secondaries = set()
+        self.secondary = None
         self.heartbeatd = d
         self.heartbeatd.addCallback(self.removeSecondary)
 
@@ -616,7 +653,7 @@ class FilesystemService():
         if verbosity > 1:
             print "SEC getting files:", files
         for f in files:
-            d = self.connectToPrimary()
+            d = self.connectToServer(self.primary)
             d.addCallback(self.requestFile, f)
             d.addErrback(self.lostPrimary)
 
@@ -635,6 +672,8 @@ class FilesystemService():
 
     def readFile(self, file_name):
         """ Read file_name. """
+        if self.role == 'SECONDARY':
+            return (207, "Connect to primary at %s:%d" % self.primary)
         if not os.path.isfile(file_name):
             return (206, "File not found.")
         if verbosity > 1:
@@ -658,6 +697,8 @@ class FilesystemService():
     def startNewTxn(self, new_file):
         """ Create and log a new transaction on new_file. """
         # Error checking
+        if self.role == 'SECONDARY':
+            return (0, 207, "Connect to primary at %s:%d" % self.primary)
         if os.path.isdir(new_file):
             return (0, 205, "A directory with that name already exists.")
         if new_file[0] == '.':
@@ -687,6 +728,8 @@ class FilesystemService():
     def saveWrite(self, txn_id, seq, buf):
         """ Add a write to txn_id identified by seq with data buf. """
         # Error checking
+        if self.role == 'SECONDARY':
+            return (207, "Connect to primary at %s:%d" % self.primary)
         if str(txn_id) not in self.txn_list:
             return (201, "Unknown transaction id.")
 
@@ -707,6 +750,8 @@ class FilesystemService():
     def abortTxn(self, txn_id):
         """ Abort transaction identified by txn_id. """
         # Error checking
+        if self.role == 'SECONDARY':
+            return (207, "Connect to primary at %s:%d" % self.primary)
         if str(txn_id) not in self.txn_list:
             return (201, "Unknown transaction id.")
         txn_info = self.txn_list[str(txn_id)]
@@ -727,6 +772,8 @@ class FilesystemService():
     def commitTxn(self, txn_id, seq):
         """ Commit transaction identified by txn_id. """
         # Error checking
+        if self.role == 'SECONDARY':
+            return ('ERROR', 207, "Connect to primary at %s:%d" % self.primary)
         if str(txn_id) not in self.txn_list:
             return ('ERROR', 201, "Unknown transaction id.")
         txn_info = self.txn_list[str(txn_id)]
@@ -788,7 +835,24 @@ class FilesystemService():
         self.file_list[filename] = hashlib.md5(open(filename, 'r').read()).hexdigest()
 
         print 'Log:', self.txn_list
+
+        # Sync to secondary
+        if self.secondary is not None:
+            d = self.connectToServer(self.secondary)
+            d.addCallback(self.sendLog, (txn_id, txn_info))
+            # Will this even work?
+            # d.addCallback(self.commitOnSecondary)
+            # d.addCallback()
+
         return ('ACK', 0, None)
+
+    def sendLog(self, protocol, (txn_id, log)):
+        print "send commit", txn_id, log
+        j = json.dumps(log)
+        protocol.sendTXN_LOG(txn_id, j)
+        # d.addCallback()
+
+    # def sendCommit
 
 
 def main():
