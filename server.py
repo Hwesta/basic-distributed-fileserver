@@ -379,9 +379,15 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
 
     def processTXN_LOG(self):
         print 'rcv TXN_LOG', self.txn, self.buf
+        (error, error_reason) = self.factory.service.writeLog(self.txn, self.buf)
+        if error != 0:
+            self.sendError(error, error_reason)
+        else:
+            self.sendACK()        
 
     def processCOMMIT_TXN(self):
         print 'rcv COMMIT_TXN', self.txn, self.seq
+        self.processCOMMIT()
 
 
 class FilesystemService():
@@ -837,6 +843,7 @@ class FilesystemService():
         print 'Log:', self.txn_list
 
         # Sync to secondary
+        # This should be done before updating the log, 
         if self.secondary is not None:
             d = self.connectToServer(self.secondary)
             d.addCallback(self.sendLog, (txn_id, txn_info))
@@ -849,10 +856,17 @@ class FilesystemService():
     def sendLog(self, protocol, (txn_id, log)):
         print "send commit", txn_id, log
         j = json.dumps(log)
-        protocol.sendTXN_LOG(txn_id, j)
-        # d.addCallback()
+        d = protocol.sendTXN_LOG(txn_id, j)
+        # d.addCallback(sendCommit, )
 
-    # def sendCommit
+    def writeLog(self, txn_id, log):
+        j = json.loads(log)
+        self.txn_list[str(txn_id)] = j
+        return (0, None)
+
+    # def sendCommit(???)
+    #     ???.sendCOMMIT_TXN(??)
+    #     Ack to client
 
 
 def main():
