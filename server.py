@@ -91,7 +91,7 @@ class SyncProtocol(LineReceiver):
     """
     Reads and parses a message to the secondary server.
 
-    Send: NEW_SEC, READ, TXN_LOG, COMMIT_TXN
+    Send: NEW_SEC, READ, SEC_COMMIT
     Format:
     -> METHOD txn_id seq length
     ->
@@ -137,16 +137,9 @@ class SyncProtocol(LineReceiver):
         self.deferred = defer.Deferred()
         return self.deferred
 
-    def sendTXN_LOG(self, txn_id, log):
+    def sendSEC_COMMIT(self, txn_id, seq, log):
         self.save_data = txn_id
-        msg = "TXN_LOG %d 0 %d\r\n\r\n%s\r\n" % (txn_id, len(log), log)
-        self.transport.write(msg)
-        self.deferred = defer.Deferred()
-        return self.deferred
-
-    def sendCOMMIT_TXN(self, txn_id, num_writes):
-        self.save_data = txn_id
-        msg = "COMMIT_TXN %s %s 0\r\n\r\n\r\n" % (txn_id, num_writes)
+        msg = "SEC_COMMIT %d %d %d\r\n\r\n%s\r\n" % (txn_id, seq, len(log), log)
         self.transport.write(msg)
         self.deferred = defer.Deferred()
         return self.deferred
@@ -163,9 +156,12 @@ class SyncProtocol(LineReceiver):
                 self.transport.loseConnection()
                 d, self.deferred = self.deferred, None
                 d.errback()
-            self.method, length = l
-            self.length = int(length)
-            # self.length = int(l[1])
+            if len(l) == 2:
+                self.method, length = l
+                self.length = int(length)
+            elif len(l) == 5:
+                self.method, __, __, __, self.length = l
+                print 'length', self.length
             return
 
         if not line:
@@ -173,6 +169,7 @@ class SyncProtocol(LineReceiver):
             self.setRawMode()
 
     def rawDataReceived(self, data):
+        print 'data', data, len(data)
         if self.length is None:
             self.buf += data
         if self.length is not None:
@@ -198,7 +195,7 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
     """
     Reads and parses a message to the primary server.
 
-    Receive: NEW_TXN, WRITE, ABORT, COMMIT, READ, NEW_SEC, TXN_LOG, COMMIT_TXN
+    Receive: NEW_TXN, WRITE, ABORT, COMMIT, READ, NEW_SEC, SEC_COMMIT
     Format:
     -> METHOD txn_id seq length
     ->
@@ -321,10 +318,8 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
             self.processABORT()
         elif self.method == "NEW_SEC":
             self.processNEW_SEC()
-        elif self.method == "TXN_LOG":
-            self.processTXN_LOG()
-        elif self.method == "COMMIT_TXN":
-            self.processCOMMIT_TXN()
+        elif self.method == "SEC_COMMIT":
+            self.processSEC_COMMIT()
         else:
             self.sendError(204, "Method does not exist.")
 
@@ -377,17 +372,14 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
         if diff_files is not None:
             self.sendSYNC_FILES(diff_files)
 
-    def processTXN_LOG(self):
-        print 'rcv TXN_LOG', self.txn, self.buf
-        (error, error_reason) = self.factory.service.writeLog(self.txn, self.buf)
+    def processSEC_COMMIT(self):
+        print 'rcv SEC_COMMIT', self.txn, self.buf
+        (error, error_reason) = self.factory.service.writeLog(self.txn, self.seq, self.buf)
+        print 'err, reason', error, error_reason
         if error != 0:
             self.sendError(error, error_reason)
         else:
             self.sendACK()        
-
-    def processCOMMIT_TXN(self):
-        print 'rcv COMMIT_TXN', self.txn, self.seq
-        self.processCOMMIT()
 
 
 class FilesystemService():
@@ -775,10 +767,10 @@ class FilesystemService():
         print 'Log:', self.txn_list
         return (0, None)
 
-    def commitTxn(self, txn_id, seq):
+    def commitTxn(self, txn_id, seq, override=False):
         """ Commit transaction identified by txn_id. """
         # Error checking
-        if self.role == 'SECONDARY':
+        if self.role == 'SECONDARY' and override==False:
             return ('ERROR', 207, "Connect to primary at %s:%d" % self.primary)
         if str(txn_id) not in self.txn_list:
             return ('ERROR', 201, "Unknown transaction id.")
@@ -846,27 +838,24 @@ class FilesystemService():
         # This should be done before updating the log, 
         if self.secondary is not None:
             d = self.connectToServer(self.secondary)
-            d.addCallback(self.sendLog, (txn_id, txn_info))
+            d.addCallback(self.sendLog, (txn_id, seq, txn_info))
             # Will this even work?
             # d.addCallback(self.commitOnSecondary)
             # d.addCallback()
 
         return ('ACK', 0, None)
 
-    def sendLog(self, protocol, (txn_id, log)):
+    def sendLog(self, protocol, (txn_id, seq, log)):
         print "send commit", txn_id, log
         j = json.dumps(log)
-        d = protocol.sendTXN_LOG(txn_id, j)
-        # d.addCallback(sendCommit, )
+        d = protocol.sendSEC_COMMIT(txn_id, seq, j)
+        # d.addCallback(ack_to_client)
 
-    def writeLog(self, txn_id, log):
+    def writeLog(self, txn_id, seq, log):
         j = json.loads(log)
         self.txn_list[str(txn_id)] = j
-        return (0, None)
-
-    # def sendCommit(???)
-    #     ???.sendCOMMIT_TXN(??)
-    #     Ack to client
+        (result, num, reason) = self.commitTxn(txn_id, seq, override=True)
+        return (num, reason)
 
 
 def main():
