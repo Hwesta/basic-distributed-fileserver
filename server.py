@@ -156,12 +156,13 @@ class SyncProtocol(LineReceiver):
                 self.transport.loseConnection()
                 d, self.deferred = self.deferred, None
                 d.errback()
+                return
             if len(l) == 2:
                 self.method, length = l
-                self.length = int(length)
             elif len(l) == 5:
-                self.method, __, __, __, self.length = l
-                print 'length', self.length
+                self.method, __, __, __, length = l
+                print 'length', length
+            self.length = int(length)
             return
 
         if not line:
@@ -854,6 +855,7 @@ class FilesystemService():
     def writeLog(self, txn_id, seq, log):
         j = json.loads(log)
         self.txn_list[str(txn_id)] = j
+        print 'writeLog'
         (result, num, reason) = self.commitTxn(txn_id, seq, override=True)
         return (num, reason)
 
