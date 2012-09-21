@@ -20,6 +20,7 @@ import shelve  # For writing out dictionary
 import shutil  # For file copy
 import hashlib
 import json
+import copy
 
 verbosity = 0
 
@@ -374,9 +375,7 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
             self.sendSYNC_FILES(diff_files)
 
     def processSEC_COMMIT(self):
-        print 'rcv SEC_COMMIT', self.txn, self.buf
         (error, error_reason) = self.factory.service.writeLog(self.txn, self.seq, self.buf)
-        print 'err, reason', error, error_reason
         if error != 0:
             self.sendError(error, error_reason)
         else:
@@ -800,6 +799,12 @@ class FilesystemService():
             print 'locked', txn_id
             time.sleep(0.05)
 
+        # Sync to secondary
+        if self.secondary is not None:
+            d = self.connectToServer(self.secondary)
+            cb_txn_info = copy.deepcopy(txn_info)
+            d.addCallback(self.sendLog, (txn_id, seq, cb_txn_info))
+
         try:
             # Copy existing file to lock
             if os.path.isfile(filename):
@@ -835,15 +840,6 @@ class FilesystemService():
 
         print 'Log:', self.txn_list
 
-        # Sync to secondary
-        # This should be done before updating the log, 
-        if self.secondary is not None:
-            d = self.connectToServer(self.secondary)
-            d.addCallback(self.sendLog, (txn_id, seq, txn_info))
-            # Will this even work?
-            # d.addCallback(self.commitOnSecondary)
-            # d.addCallback()
-
         return ('ACK', 0, None)
 
     def sendLog(self, protocol, (txn_id, seq, log)):
@@ -854,8 +850,9 @@ class FilesystemService():
 
     def writeLog(self, txn_id, seq, log):
         j = json.loads(log)
+        # Convert dict keys back to int
+        j['writes'] = dict([(int(k), j['writes'][k]) for k in j['writes']])
         self.txn_list[str(txn_id)] = j
-        print 'writeLog'
         (result, num, reason) = self.commitTxn(txn_id, seq, override=True)
         return (num, reason)
 
