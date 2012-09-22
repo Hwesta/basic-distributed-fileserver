@@ -130,7 +130,7 @@ class SyncProtocol(LineReceiver):
         return self.deferred
 
     def sendREAD(self, fname):
-        self.save_data = fname
+        #self.save_data = fname
         msg = "READ 0 0 %d\r\n\r\n%s\r\n" % (len(fname), fname)
         self.transport.write(msg)
         self.buf = ""
@@ -162,7 +162,6 @@ class SyncProtocol(LineReceiver):
                 self.method, length = l
             elif len(l) == 5:
                 self.method, __, __, __, length = l
-                print 'length', length
             self.length = int(length)
             return
 
@@ -171,7 +170,6 @@ class SyncProtocol(LineReceiver):
             self.setRawMode()
 
     def rawDataReceived(self, data):
-        print 'data', data, len(data)
         if self.length is None:
             self.buf += data
         if self.length is not None:
@@ -369,8 +367,6 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
         if verbosity > 2:
             print "Files from secondary:", files
         diff_files = self.factory.service.addSecondary(host, int(port), files)
-        if verbosity > 1:
-            print 'Differing files:', diff_files
         if diff_files is not None:
             self.sendSYNC_FILES(diff_files)
 
@@ -545,7 +541,7 @@ class FilesystemService():
         self.setupHeartbeat()
         self.heartbeatd.addCallback(self.removeSecondary)
 
-
+    @defer.inlineCallbacks
     def becomeSecondary(self, primary):
         """ Become secondary server.  Run on boot. """
         if self.role != None:
@@ -560,7 +556,6 @@ class FilesystemService():
         self.hashFiles()
 
         # Remove NEW_TXNs if secondary
-        # TODO check when need to forget NEW_TXNs
         for (txn_id, txn) in self.txn_list.items():
             if (txn_id != 'next_id' and txn['status'] == 'NEW_TXN'):
                 del self.txn_list[str(txn_id)]
@@ -568,8 +563,34 @@ class FilesystemService():
             print 'Log:', self.txn_list
 
         # Sync with primary
-        d = self.connectToServer(self.primary)
-        d.addCallbacks(self.announceSecondary, self.couldNotConnect)
+        try:
+            protocol = yield self.connectToServer(self.primary)
+        except Exception, e:
+            if verbosity > 0:
+                print "SEC Could not connect to primary. Becoming primary."
+            self.becomePrimary()
+
+
+        if verbosity > 1:
+            print "SEC files:", self.file_list
+        j = json.dumps(self.file_list)
+        j = yield protocol.sendNEW_SEC(self.host, self.port, j)
+
+        files = json.loads(j)
+        files = map(str, files)
+        if verbosity > 1:
+            print "SEC getting files:", files
+        for fname in files:
+            try:
+                protocol = yield self.connectToServer(self.primary)
+                buf = yield protocol.sendREAD(fname)
+            except Exception, e:
+                self.lostPrimary()
+            if verbosity > 2:
+                print "SEC writing file:", fname
+                print "SEC writing data:", buf
+            with open(fname, 'w') as f:
+                f.write(buf)
 
         # Setup heartbeat
         self.setupHeartbeat()
@@ -581,11 +602,6 @@ class FilesystemService():
         connection = ClientCreator(reactor, SyncProtocol)
         d = connection.connectTCP(host, port)
         return d
-
-    def couldNotConnect(self, reason):
-        if verbosity > 0:
-            print "SEC Could not connect to primary. (%s) Becoming primary." % reason
-        self.becomePrimary()
 
     def setupHeartbeat(self):
         if self.heartbeatd is None:
@@ -600,21 +616,10 @@ class FilesystemService():
         self.heartbeatd = d
         self.becomePrimary()
 
-    def announceSecondary(self, protocol):
-        """
-        Announce self as secondary to primary server.  Called by secondary
-        once connection established with the primary.
-        """
-        if verbosity > 1:
-            print "SEC files:", self.file_list
-        j = json.dumps(self.file_list)
-        d = protocol.sendNEW_SEC(self.host, self.port, j)
-        # TODO add errback - but it should never errback here!!
-        d.addCallback(self.getPrimaryFiles)
-
     def addSecondary(self, host, port, files):
-        """ 
-        Return files that differ from local files, given a list of files.
+        """
+        Adds a secondary to the primary.  Returns a list of files that differ,
+        comparing the provided list and the primary's files.
         """
         self.secondary = (host,port)
         if verbosity > 0:
@@ -641,32 +646,6 @@ class FilesystemService():
         self.secondary = None
         self.heartbeatd = d
         self.heartbeatd.addCallback(self.removeSecondary)
-
-    def getPrimaryFiles(self, json_files):
-        """
-        Requests files from primary that the secondary needs to sync.
-        """
-        files = json.loads(json_files)
-        files = map(str, files)
-        if verbosity > 1:
-            print "SEC getting files:", files
-        for f in files:
-            d = self.connectToServer(self.primary)
-            d.addCallback(self.requestFile, f)
-            d.addErrback(self.lostPrimary)
-
-    def requestFile(self, protocol, fname):
-        """ Send READ request for fname. """
-        d = protocol.sendREAD(fname)
-        d.addCallback(self.saveFile)
-
-    def saveFile(self, (fname, buf)):
-        """ (Over)write fname with buf. """
-        if verbosity > 2:
-            print "SEC writing file:", fname
-            print "SEC writing data:", buf
-        with open(fname, 'w') as f:
-            f.write(buf)
 
     def readFile(self, file_name):
         """ Read file_name. """
