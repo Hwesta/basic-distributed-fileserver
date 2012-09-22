@@ -130,7 +130,6 @@ class SyncProtocol(LineReceiver):
         return self.deferred
 
     def sendREAD(self, fname):
-        #self.save_data = fname
         msg = "READ 0 0 %d\r\n\r\n%s\r\n" % (len(fname), fname)
         self.transport.write(msg)
         self.buf = ""
@@ -139,7 +138,6 @@ class SyncProtocol(LineReceiver):
         return self.deferred
 
     def sendSEC_COMMIT(self, txn_id, seq, log):
-        self.save_data = txn_id
         msg = "SEC_COMMIT %d %d %d\r\n\r\n%s\r\n" % (txn_id, seq, len(log), log)
         self.transport.write(msg)
         self.deferred = defer.Deferred()
@@ -353,13 +351,23 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
             self.sendACK()
 
     def processCOMMIT(self):
-        (decision, error, details) = self.factory.service.commitTxn(self.txn, self.seq)
-        if decision == 'ACK':
+        d = self.factory.service.commitTxn(self.txn, self.seq)
+        d.addCallbacks(self.commitSuccess, self.commitFail)
+
+    def commitSuccess(self, (action, writes)):
+        if action == 'ASK_RESEND':
+            self.sendASK_RESEND(writes)
+        elif action == 'ACK':
             self.sendACK()
-        elif decision == 'ERROR':
-            self.sendError(error, details)
-        elif decision == 'ASK_RESEND':
-            self.sendASK_RESEND(details)
+        else:
+            print 'WTF ERROR'
+
+    def commitFail(self, reason):
+        try:
+            (error, error_reason) = reason.value
+            self.sendError(error, error_reason)
+        except Exception, e:
+            print "WTF ERROR", e
 
     def processNEW_SEC(self):
         (peer, files) = self.buf.split('\r\n', 1)
@@ -371,11 +379,8 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
             self.sendSYNC_FILES(diff_files)
 
     def processSEC_COMMIT(self):
-        (error, error_reason) = self.factory.service.writeLog(self.txn, self.seq, self.buf)
-        if error != 0:
-            self.sendError(error, error_reason)
-        else:
-            self.sendACK()        
+        d = self.factory.service.writeLog(self.txn, self.seq, self.buf)
+        d.addCallbacks(self.commitSuccess, self.commitFail)
 
 
 class FilesystemService():
@@ -548,7 +553,6 @@ class FilesystemService():
             print "ERROR: Becoming secondary, previous roles %s" % self.role
         self.role = 'SECONDARY'
         self.primary = primary
-
         if verbosity > 0:
             print "Role:", self.role
             print "Primary:", primary
@@ -569,7 +573,6 @@ class FilesystemService():
             if verbosity > 0:
                 print "SEC Could not connect to primary. Becoming primary."
             self.becomePrimary()
-
 
         if verbosity > 1:
             print "SEC files:", self.file_list
@@ -595,7 +598,6 @@ class FilesystemService():
         # Setup heartbeat
         self.setupHeartbeat()
         self.heartbeatd.addCallback(self.lostPrimary)
-
 
     def connectToServer(self, (host,port)):
         """ Establish connection from secondary to primary. Return Deferred. """
@@ -746,24 +748,25 @@ class FilesystemService():
         print 'Log:', self.txn_list
         return (0, None)
 
+    @defer.inlineCallbacks
     def commitTxn(self, txn_id, seq, override=False):
         """ Commit transaction identified by txn_id. """
         # Error checking
         if self.role == 'SECONDARY' and override==False:
-            return ('ERROR', 207, "Connect to primary at %s:%d" % self.primary)
+            raise Exception(207, "Connect to primary at %s:%d" % self.primary)
         if str(txn_id) not in self.txn_list:
-            return ('ERROR', 201, "Unknown transaction id.")
+            raise Exception(201, "Unknown transaction id.")
         txn_info = self.txn_list[str(txn_id)]
 
         if txn_info['status'] == 'ABORT':
-            return ('ERROR', 202, "Transaction has been aborted already.")
+            raise Exception(202, "Transaction has been aborted already.")
         elif txn_info['status'] == 'COMMIT':  # Don't recheck sequence number
-            return ('ACK', 0, None)
+            defer.returnValue( ('ACK', None) )
 
         # Check that have right number of writes
         unsent = [k for k in range(0,seq) if k not in txn_info['writes']]
         if len(unsent) != 0:
-            return ('ASK_RESEND', 0, unsent)
+            defer.returnValue( ('ASK_RESEND', unsent) )
 
         # Write to the file
 
@@ -780,9 +783,12 @@ class FilesystemService():
 
         # Sync to secondary
         if self.secondary is not None:
-            d = self.connectToServer(self.secondary)
             cb_txn_info = copy.deepcopy(txn_info)
-            d.addCallback(self.sendLog, (txn_id, seq, cb_txn_info))
+            protocol = yield self.connectToServer(self.secondary)
+            j = json.dumps(txn_info)
+            print 'j', j
+            result = yield protocol.sendSEC_COMMIT(txn_id, seq, j)
+            print 'result', result, type(result)
 
         try:
             # Copy existing file to lock
@@ -799,7 +805,7 @@ class FilesystemService():
             # Copy back
             shutil.move(lock_file, filename)
         except:
-            return ('ERROR', 205, 
+            raise Exception(205,
                     "File IO error.  Check server settings and permissions.")
         finally:
             try:
@@ -815,25 +821,21 @@ class FilesystemService():
         self.txn_list[str(txn_id)] = txn_info
         self.txn_list.sync()
 
+        # Update file hash
         self.file_list[filename] = hashlib.md5(open(filename, 'r').read()).hexdigest()
 
         print 'Log:', self.txn_list
 
-        return ('ACK', 0, None)
+        defer.returnValue( ('ACK', None) )
 
-    def sendLog(self, protocol, (txn_id, seq, log)):
-        print "send commit", txn_id, log
-        j = json.dumps(log)
-        d = protocol.sendSEC_COMMIT(txn_id, seq, j)
-        # d.addCallback(ack_to_client)
-
+    @defer.inlineCallbacks
     def writeLog(self, txn_id, seq, log):
         j = json.loads(log)
         # Convert dict keys back to int
         j['writes'] = dict([(int(k), j['writes'][k]) for k in j['writes']])
         self.txn_list[str(txn_id)] = j
-        (result, num, reason) = self.commitTxn(txn_id, seq, override=True)
-        return (num, reason)
+        (result, reason) = yield self.commitTxn(txn_id, seq, override=True)
+        defer.returnValue( (reason, reason) )
 
 
 def main():
