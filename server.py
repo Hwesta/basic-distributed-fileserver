@@ -360,7 +360,7 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
         elif action == 'ACK':
             self.sendACK()
         else:
-            print 'WTF ERROR'
+            print 'WTF ERROR', action, writes
 
     def commitFail(self, reason):
         try:
@@ -566,7 +566,7 @@ class FilesystemService():
         if verbosity > 0:
             print 'Log:', self.txn_list
 
-        # Sync with primary
+        # Sync files with primary
         try:
             protocol = yield self.connectToServer(self.primary)
         except Exception, e:
@@ -783,12 +783,15 @@ class FilesystemService():
 
         # Sync to secondary
         if self.secondary is not None:
-            cb_txn_info = copy.deepcopy(txn_info)
-            protocol = yield self.connectToServer(self.secondary)
-            j = json.dumps(txn_info)
-            print 'j', j
-            result = yield protocol.sendSEC_COMMIT(txn_id, seq, j)
-            print 'result', result, type(result)
+            try:
+                protocol = yield self.connectToServer(self.secondary)
+            except:
+                if verbosity > 0:
+                    print "No secondary, despite heartbeat."
+            else:
+                cb_txn_info = copy.deepcopy(txn_info)
+                j = json.dumps(txn_info)
+                yield protocol.sendSEC_COMMIT(txn_id, seq, j)
 
         try:
             # Copy existing file to lock
@@ -835,7 +838,7 @@ class FilesystemService():
         j['writes'] = dict([(int(k), j['writes'][k]) for k in j['writes']])
         self.txn_list[str(txn_id)] = j
         (result, reason) = yield self.commitTxn(txn_id, seq, override=True)
-        defer.returnValue( (reason, reason) )
+        defer.returnValue( (result, reason) )
 
 
 def main():
