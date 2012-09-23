@@ -167,7 +167,7 @@ class SyncProtocol(LineReceiver):
             if l[0] == "ERROR":
                 self.transport.loseConnection()
                 d, self.deferred = self.deferred, None
-                d.errback()
+                d.errback(Exception(208, "Failed on other server. Line: %s" % line))
                 return
             if len(l) == 2:
                 self.method, length = l
@@ -401,6 +401,7 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
             self.sendError(error, error_reason)
         except Exception, e:
             print "WTF ERROR", e
+            self.sendError(209, "An unknown error occurred.")
 
 
 class FilesystemService():
