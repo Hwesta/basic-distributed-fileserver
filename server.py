@@ -63,20 +63,20 @@ class Heartbeat(DatagramProtocol, TimeoutMixin):
 
     def datagramReceived(self, data, __):
         if data != self.msg:
-            if verbosity > 3:
+            if verbosity > 4:
                 print "Heartbeat received %r" % data
             if self.expect_rcv:
                 self.resetTimeout()
-                if verbosity > 3:
+                if verbosity > 4:
                     print 'Heartbeat reset timeout'
             else:
                 self.setTimeout(2.5)  # seconds
                 self.expect_rcv = True
-                if verbosity > 3:
+                if verbosity > 4:
                     print 'Heartbeat started timeout'
 
     def timeoutConnection(self):
-        if verbosity > 2:
+        if verbosity > 3:
             print 'Heartbeat timeout connection'
         self.expect_rcv = False
         if self.deferred is not None:
