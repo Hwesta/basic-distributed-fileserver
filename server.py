@@ -484,9 +484,9 @@ class FilesystemService():
             port = int(port)
             if host == self.host and port == self.port:
                 self.becomePrimary()
-            # elif host == 'localhost':
-            #     print "Cannot run on localhost.  Exiting."
-            #     sys.exit(-1)
+            elif host == 'localhost' or host == '127.0.0.1':
+                print "Cannot run on localhost.  Exiting."
+                sys.exit(-1)
             else:
                 self.becomeSecondary((host,port))
         except ValueError:
@@ -760,7 +760,7 @@ class FilesystemService():
         self.txn_list.sync()
 
         if verbosity > 0:
-            print 'Log:', self.txn_list
+            print 'Log:', self.txn_list[str(txn_id)]
         return (txn_id, 0, None)
 
     def saveWrite(self, txn_id, seq, buf):
@@ -783,7 +783,7 @@ class FilesystemService():
         self.txn_list.sync()
 
         if verbosity > 0:
-            print 'Log:', self.txn_list
+            print 'Log:', self.txn_list[str(txn_id)]
         return (0, None)
 
     @defer.inlineCallbacks
@@ -820,7 +820,7 @@ class FilesystemService():
         self.txn_list.sync()
 
         if verbosity > 0:
-            print 'Log:', self.txn_list
+            print 'Log:', self.txn_list[str(txn_id)]
 
         defer.returnValue( ('ACK', None) )
 
@@ -905,7 +905,7 @@ class FilesystemService():
         self.file_list[filename] = hashlib.md5(open(filename, 'r').read()).hexdigest()
 
         if verbosity > 0:
-            print 'Log:', self.txn_list
+            print 'Log:', self.txn_list[str(txn_id)]
 
         defer.returnValue( ('ACK', None) )
 
