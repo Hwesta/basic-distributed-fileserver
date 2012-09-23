@@ -150,6 +150,12 @@ class SyncProtocol(LineReceiver):
         self.deferred = defer.Deferred()
         return self.deferred
 
+    def sendSEC_ABORT(self, txn_id, seq, log):
+        msg = "SEC_ABORT %d %d %d\r\n\r\n%s\r\n" % (txn_id, seq, len(log), log)
+        self.transport.write(msg)
+        self.deferred = defer.Deferred()
+        return self.deferred
+
     def lineReceived(self, line):
         if verbosity > 3:
             print 'SyncProtocol rcv:', line
@@ -325,6 +331,8 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
             self.processSYNC_LOG()
         elif self.method == "SEC_COMMIT":
             self.processSEC_COMMIT()
+        elif self.method == "SEC_ABORT":
+            self.processSEC_ABORT()
         else:
             self.sendError(204, "Method does not exist.")
 
@@ -351,11 +359,8 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
         self.transport.loseConnection()
 
     def processABORT(self):
-        (error, error_reason) = self.factory.service.abortTxn(self.txn)
-        if error != 0:
-            self.sendError(error, error_reason)
-        else:
-            self.sendACK()
+        d = self.factory.service.abortTxn(self.txn, self.seq)
+        d.addCallbacks(self.commitSuccess, self.commitFail)
 
     def processCOMMIT(self):
         d = self.factory.service.commitTxn(self.txn, self.seq)
@@ -375,7 +380,11 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
         self.transport.loseConnection()
 
     def processSEC_COMMIT(self):
-        d = self.factory.service.writeLog(self.txn, self.seq, self.buf)
+        d = self.factory.service.writeLog('COMMIT', self.txn, self.seq, self.buf)
+        d.addCallbacks(self.commitSuccess, self.commitFail)
+
+    def processSEC_ABORT(self):
+        d = self.factory.service.writeLog('ABORT', self.txn, self.seq, self.buf)
         d.addCallbacks(self.commitSuccess, self.commitFail)
 
     def commitSuccess(self, (action, writes)):
@@ -776,17 +785,31 @@ class FilesystemService():
             print 'Log:', self.txn_list
         return (0, None)
 
-    def abortTxn(self, txn_id):
+    @defer.inlineCallbacks
+    def abortTxn(self, txn_id, seq, override=False):
         """ Abort transaction identified by txn_id. """
         # Error checking
-        if self.role == 'SECONDARY':
-            return (207, "Connect to primary at %s:%d" % self.primary)
+        if self.role == 'SECONDARY' and not override:
+            raise Exception (207, "Connect to primary at %s:%d" % self.primary)
         if str(txn_id) not in self.txn_list:
-            return (201, "Unknown transaction id.")
+            raise Exception (201, "Unknown transaction id.")
         txn_info = self.txn_list[str(txn_id)]
 
         if txn_info['status'] == 'COMMIT':
-            return (202, "Transaction has been comitted already.")
+            raise Exception (202, "Transaction has been comitted already.")
+
+        # Sync to secondary
+        if self.secondary is not None:
+            try:
+                protocol = yield self.connectToServer(self.secondary)
+            except:
+                if verbosity > 0:
+                    print "No secondary, despite heartbeat."
+            else:
+                cb_txn_info = copy.deepcopy(txn_info)
+                j = json.dumps(txn_info)
+                # needs error checking
+                yield protocol.sendSEC_ABORT(txn_id, seq, j)
 
         # Update status
         txn_info['status'] = 'ABORT'
@@ -797,13 +820,14 @@ class FilesystemService():
 
         if verbosity > 0:
             print 'Log:', self.txn_list
-        return (0, None)
+
+        defer.returnValue( ('ACK', None) )
 
     @defer.inlineCallbacks
     def commitTxn(self, txn_id, seq, override=False):
         """ Commit transaction identified by txn_id. """
         # Error checking
-        if self.role == 'SECONDARY' and override==False:
+        if self.role == 'SECONDARY' and not override:
             raise Exception(207, "Connect to primary at %s:%d" % self.primary)
         if str(txn_id) not in self.txn_list:
             raise Exception(201, "Unknown transaction id.")
@@ -842,6 +866,7 @@ class FilesystemService():
             else:
                 cb_txn_info = copy.deepcopy(txn_info)
                 j = json.dumps(txn_info)
+                # needs error checking
                 yield protocol.sendSEC_COMMIT(txn_id, seq, j)
 
         try:
@@ -884,12 +909,15 @@ class FilesystemService():
         defer.returnValue( ('ACK', None) )
 
     @defer.inlineCallbacks
-    def writeLog(self, txn_id, seq, log):
+    def writeLog(self, action, txn_id, seq, log):
         j = json.loads(log)
         # Convert dict keys back to int
         j['writes'] = dict([(int(k), j['writes'][k]) for k in j['writes']])
         self.txn_list[str(txn_id)] = j
-        (result, reason) = yield self.commitTxn(txn_id, seq, override=True)
+        if action == 'COMMIT':
+            (result, reason) = yield self.commitTxn(txn_id, seq, override=True)
+        elif action == 'ABORT':
+            (result, reason) = yield self.abortTxn(txn_id, seq, override=True)
         defer.returnValue( (result, reason) )
 
 
