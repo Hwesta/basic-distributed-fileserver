@@ -92,7 +92,7 @@ class SyncProtocol(LineReceiver):
     """
     Reads and parses a message to the secondary server.
 
-    Send: NEW_SEC, READ, SEC_COMMIT
+    Send: NEW_SEC, READ, SEC_COMMIT, SYNC_LOG
     Format:
     -> METHOD txn_id seq length
     ->
@@ -118,7 +118,6 @@ class SyncProtocol(LineReceiver):
     firstLine = True
     method = None
     length = None
-    save_data = None
     buf = None
     deferred = None
 
@@ -131,6 +130,14 @@ class SyncProtocol(LineReceiver):
 
     def sendREAD(self, fname):
         msg = "READ 0 0 %d\r\n\r\n%s\r\n" % (len(fname), fname)
+        self.transport.write(msg)
+        self.buf = ""
+        self.setRawMode()
+        self.deferred = defer.Deferred()
+        return self.deferred
+
+    def sendSYNC_LOG(self):
+        msg = "SYNC_LOG 0 0 0\r\n\r\n\r\n"
         self.transport.write(msg)
         self.buf = ""
         self.setRawMode()
@@ -183,17 +190,14 @@ class SyncProtocol(LineReceiver):
     def processMessage(self):
         if self.deferred is not None:
             d, self.deferred = self.deferred, None
-            if self.save_data is not None:
-                d.callback((self.save_data, self.buf))
-            else:
-                d.callback(self.buf)
+            d.callback(self.buf)
 
 # Messages parsing modeled off of twisted.web.http HTTPClient and HTTPChannel
 class FilesystemProtocol(LineReceiver, TimeoutMixin):
     """
     Reads and parses a message to the primary server.
 
-    Receive: NEW_TXN, WRITE, ABORT, COMMIT, READ, NEW_SEC, SEC_COMMIT
+    Receive: NEW_TXN, WRITE, ABORT, COMMIT, READ, NEW_SEC, SEC_COMMIT, SYNC_LOG
     Format:
     -> METHOD txn_id seq length
     ->
@@ -273,7 +277,8 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
             self.processMessage()
 
     def timeoutConnection(self):
-        print "Timing out client: %s" % str(self.transport.getPeer())
+        if verbosity > 0:
+            print "Timing out client: %s" % str(self.transport.getPeer())
         self.sendError(204,
                        "Connection timed out (is length longer than data?)")
 
@@ -316,6 +321,8 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
             self.processABORT()
         elif self.method == "NEW_SEC":
             self.processNEW_SEC()
+        elif self.method == "SYNC_LOG":
+            self.processSYNC_LOG()
         elif self.method == "SEC_COMMIT":
             self.processSEC_COMMIT()
         else:
@@ -354,6 +361,23 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
         d = self.factory.service.commitTxn(self.txn, self.seq)
         d.addCallbacks(self.commitSuccess, self.commitFail)
 
+    def processNEW_SEC(self):
+        (peer, files) = self.buf.split('\r\n', 1)
+        (host, port) = peer.split()
+        if verbosity > 2:
+            print "Files from secondary:", files
+        diff_files = self.factory.service.addSecondary(host, int(port), files)
+        self.sendSYNC_FILES(diff_files)
+
+    def processSYNC_LOG(self):
+        log = self.factory.service.syncLog()
+        self.transport.write(log)
+        self.transport.loseConnection()
+
+    def processSEC_COMMIT(self):
+        d = self.factory.service.writeLog(self.txn, self.seq, self.buf)
+        d.addCallbacks(self.commitSuccess, self.commitFail)
+
     def commitSuccess(self, (action, writes)):
         if action == 'ASK_RESEND':
             self.sendASK_RESEND(writes)
@@ -368,19 +392,6 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
             self.sendError(error, error_reason)
         except Exception, e:
             print "WTF ERROR", e
-
-    def processNEW_SEC(self):
-        (peer, files) = self.buf.split('\r\n', 1)
-        (host, port) = peer.split()
-        if verbosity > 2:
-            print "Files from secondary:", files
-        diff_files = self.factory.service.addSecondary(host, int(port), files)
-        if diff_files is not None:
-            self.sendSYNC_FILES(diff_files)
-
-    def processSEC_COMMIT(self):
-        d = self.factory.service.writeLog(self.txn, self.seq, self.buf)
-        d.addCallbacks(self.commitSuccess, self.commitFail)
 
 
 class FilesystemService():
@@ -535,7 +546,8 @@ class FilesystemService():
         # Write to primary.txt
         with open(self.primary_txt, 'w') as f:
             buf = "%s %d" % (self.host, self.port)
-            print 'writing to primary.txt', buf
+            if verbosity > 1:
+                print 'writing to primary.txt', buf
             f.write(buf)
 
         if verbosity > 0:
@@ -573,7 +585,7 @@ class FilesystemService():
             if verbosity > 0:
                 print "SEC Could not connect to primary. Becoming primary."
             self.becomePrimary()
-
+            return
         if verbosity > 1:
             print "SEC files:", self.file_list
         j = json.dumps(self.file_list)
@@ -589,11 +601,34 @@ class FilesystemService():
                 buf = yield protocol.sendREAD(fname)
             except Exception, e:
                 self.lostPrimary()
+                return
+
             if verbosity > 2:
                 print "SEC writing file:", fname
                 print "SEC writing data:", buf
             with open(fname, 'w') as f:
                 f.write(buf)
+
+        # Sync log
+        try:
+            protocol = yield self.connectToServer(self.primary)
+        except Exception, e:
+            if verbosity > 0:
+                print "SEC Could not connect to primary. Becoming primary."
+            self.becomePrimary()
+            return
+        j = yield protocol.sendSYNC_LOG()
+        new_log = json.loads(j)
+        if verbosity > 1:
+            print "Log items from primary:", new_log
+        for txn_id in new_log:
+            txn = new_log[txn_id]
+            # Convert from unicode to str?
+            txn['writes'] = dict([(int(k), txn['writes'][k]) for k in txn['writes']])
+            self.txn_list[txn_id] = new_log[txn_id]
+
+        if verbosity > 0:
+            print "Log:", self.txn_list
 
         # Setup heartbeat
         self.setupHeartbeat()
@@ -649,6 +684,15 @@ class FilesystemService():
         self.heartbeatd = d
         self.heartbeatd.addCallback(self.removeSecondary)
 
+    def syncLog(self):
+        log = {}
+        for (txn_id, txn) in self.txn_list.items():
+            if (txn_id != 'next_id' and
+                (txn['status'] == 'COMMIT' or txn['status'] == 'ABORT')):
+                log[txn_id] = self.txn_list[str(txn_id)]
+        j = json.dumps(log)
+        return j
+
     def readFile(self, file_name):
         """ Read file_name. """
         if self.role == 'SECONDARY':
@@ -686,7 +730,11 @@ class FilesystemService():
             return (0, 202, "Creating directories (or files in subdirectories) is forbidden.")
 
         # New transaction information
+        # TODO TEST THIS
         txn_id = self.txn_list['next_id']
+        while (str(txn_id) in self.txn_list):
+            txn_id+=1
+
         txn_info = {'file': new_file,
                     'status': 'NEW_TXN',
                     'writes': {},
@@ -701,7 +749,8 @@ class FilesystemService():
         self.txn_list.sync()
         self.txn_list.sync()
 
-        print 'Log:', self.txn_list
+        if verbosity > 0:
+            print 'Log:', self.txn_list
         return (txn_id, 0, None)
 
     def saveWrite(self, txn_id, seq, buf):
@@ -723,7 +772,8 @@ class FilesystemService():
         self.txn_list[str(txn_id)] = txn_info
         self.txn_list.sync()
 
-        print 'Log:', self.txn_list
+        if verbosity > 0:
+            print 'Log:', self.txn_list
         return (0, None)
 
     def abortTxn(self, txn_id):
@@ -745,7 +795,8 @@ class FilesystemService():
         self.txn_list[str(txn_id)] = txn_info
         self.txn_list.sync()
 
-        print 'Log:', self.txn_list
+        if verbosity > 0:
+            print 'Log:', self.txn_list
         return (0, None)
 
     @defer.inlineCallbacks
@@ -827,7 +878,8 @@ class FilesystemService():
         # Update file hash
         self.file_list[filename] = hashlib.md5(open(filename, 'r').read()).hexdigest()
 
-        print 'Log:', self.txn_list
+        if verbosity > 0:
+            print 'Log:', self.txn_list
 
         defer.returnValue( ('ACK', None) )
 
