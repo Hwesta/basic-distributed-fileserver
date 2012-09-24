@@ -92,7 +92,7 @@ class SyncProtocol(LineReceiver):
     """
     Reads and parses a message to the secondary server.
 
-    Send: NEW_SEC, READ, SEC_COMMIT, SYNC_LOG
+    Send: NEW_SEC, READ, SYNC_LOG, SEC_COMMIT, SEC_ABORT
     Format:
     -> METHOD txn_id seq length
     ->
@@ -203,7 +203,8 @@ class FilesystemProtocol(LineReceiver, TimeoutMixin):
     """
     Reads and parses a message to the primary server.
 
-    Receive: NEW_TXN, WRITE, ABORT, COMMIT, READ, NEW_SEC, SEC_COMMIT, SYNC_LOG
+    Receive: NEW_TXN, WRITE, ABORT, COMMIT, READ, NEW_SEC, SYNC_LOG,
+             SEC_COMMIT, SEC_ABORT
     Format:
     -> METHOD txn_id seq length
     ->
