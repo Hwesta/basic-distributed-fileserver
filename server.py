@@ -629,13 +629,14 @@ class FilesystemService():
             return
         j = yield protocol.sendSYNC_LOG()
         new_log = json.loads(j)
+        new_log = dict([(str(k), new_log[k]) for k in new_log])
         if verbosity > 1:
             print "Log items from primary:", new_log
         for txn_id in new_log:
             txn = new_log[txn_id]
-            # Convert from unicode to str?
+            txn = dict([(str(k), txn[k]) for k in txn])
             txn['writes'] = dict([(int(k), txn['writes'][k]) for k in txn['writes']])
-            self.txn_list[txn_id] = new_log[txn_id]
+            self.txn_list[txn_id] = txn
 
         if verbosity > 0:
             print "Log:", self.txn_list
