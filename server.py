@@ -449,8 +449,8 @@ class FilesystemService():
         # Create log directory
         try:
             os.makedirs(self.logdir)
-        except OSError as exception:
-            if exception.errno != errno.EEXIST:
+        except OSError as e:
+            if e.errno != errno.EEXIST:
                 print "Could not initialize server.  Does the directory have execute permission?"
                 sys.exit(-1)
 
@@ -675,6 +675,7 @@ class FilesystemService():
         # Compare given files with own files
         sec_files = json.loads(files)
         diff_files = {}
+        sec_files = dict([(str(k), sec_files[k]) for k in sec_files])
 
         for local_file in self.file_list:
             if local_file not in sec_files or \
@@ -912,7 +913,8 @@ class FilesystemService():
     @defer.inlineCallbacks
     def writeLog(self, action, txn_id, seq, log):
         j = json.loads(log)
-        # Convert dict keys back to int
+        # Convert dict keys from unicode strings to correct type
+        j = dict([(str(k), j[k]) for k in j])
         j['writes'] = dict([(int(k), j['writes'][k]) for k in j['writes']])
         self.txn_list[str(txn_id)] = j
         if action == 'COMMIT':
