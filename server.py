@@ -475,7 +475,7 @@ class FilesystemService():
         try:
             f = open(self.primary_txt)
         except:
-            print "Primary.txt could not be opened."
+            print "Primary.txt could not be opened.  Is it an absolute path, or relative from the directory?"
             sys.exit(-1)
 
         # Determine role from primary.txt
@@ -485,9 +485,9 @@ class FilesystemService():
             port = int(port)
             if host == self.host and port == self.port:
                 self.becomePrimary()
-            elif host == 'localhost' or host == '127.0.0.1':
-                print "Cannot run on localhost.  Exiting."
-                sys.exit(-1)
+            #elif host == 'localhost' or host == '127.0.0.1':
+                #print "Cannot run on localhost.  Exiting."
+                #sys.exit(-1)
             else:
                 self.becomeSecondary((host,port))
         except ValueError:
