@@ -1,17 +1,17 @@
 import java.net.*;
 import java.io.*;
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
 import java.util.Date;
+import java.util.Random;
 import java.text.SimpleDateFormat;
 
-public class TCPClient
+public class TCPClient2
 {
 	//A 4KB buffer to receive server messages.
 	final static int BUF_LEN = 4096; 
 	final static int EXP_FIELDS = 1;
 	final static int TIMEOUT = 2000;
+	
+	static final Random random = new Random();
 
 	public static String parseCommand(String str)
 	{
@@ -50,7 +50,9 @@ public class TCPClient
 					System.out.print("Data:\t\t\t");
 					break;
 				default:
-					System.out.print("Unknown Field:\t");
+					System.out.print("Unknown Field (adding to data):\t");
+					if(result.length > 4)
+						result[4] += ' ' + result[x];
 					break;
 			}
 			System.out.println(result[x]);
@@ -100,27 +102,48 @@ public class TCPClient
 
 		if(method.equals("NEW_TXN"))
 		{
-			System.out.println("Looks like your method is \"NEW_TXN\"." +
-					"I will generate a file name for this transaction.");
-			content = "test_file.txt";
+			if(data!= "")
+			{
+				System.out.println("Looks like your method is \"NEW_TXN\"." +
+						"You specified a " + data + "file name for this transaction.");
+
+				txn_id = "-1";
+				seq_num = "0";
+				content = data;
+			}
+			else
+			{
+				System.out.println("Looks like your method is \"NEW_TXN\"." +
+						"Since you haven't specified new file name I will generate a file name for this transaction.");
+
+				content = "test_file_" + Math.abs(random.nextInt()) + ".txt";
+			}
 			content_length = (new Integer(content.length())).toString();
 		}
 
-		if(method.equals("WRITE"))
+		else if(method.equals("WRITE"))
 		{
-			System.out.println("Looks like your method is \"WRITE\"." +
-					"I will generate some content to send to the server.");
-
-			Date date = new Date();
-			SimpleDateFormat sdf = new SimpleDateFormat("EEE, d MMM yyyy HH:mm:ss Z");
-
-			content = method + " " + txn_id + " " + seq_num + " " +
-				content_length + " " +
-				sdf.format(date) + "\n";
-
+			if(data!= "")
+			{
+				System.out.println("Looks like your method is \"WRITE\"." +
+						"I will will write the following content \""+data+"\" to the server.");
+				content = data + "\n";
+			}
+			else
+			{
+				System.out.println("Looks like your method is \"WRITE\"." +
+						"I will generate some content to send to the server.");
+	
+				Date date = new Date();
+				SimpleDateFormat sdf = new SimpleDateFormat("EEE, d MMM yyyy HH:mm:ss Z");
+	
+				content = method + " " + txn_id + " " + seq_num + " " +
+					content_length + " " +
+					sdf.format(date) + "\n";
+			}
 			content_length = (new Integer(content.length())).toString();
 		}
-		if(method.equals("READ"))
+		else if(method.equals("READ"))
 		{
 			System.out.println("Looks like your method is \"READ\"." +
 					"I will request the file " + data + " from the server.");
@@ -181,19 +204,11 @@ public class TCPClient
 		{
 			while( (bytesRead = in.read(b, 0, BUF_LEN)) > 0)
 			{
-				/* Display non-printable characters */
 				for(int i = 0; i < bytesRead; i++)
-				{
-					/*
-					   if(b[i] < 32 || b[i] > 126)
-					   System.out.println("Unprintable character " + b[i] + ".");
-					 */
-				}
-
-				b[bytesRead] = (byte)'\0';
-				System.out.print(new String(b));
+					System.out.print((char)b[i]);
 				bytesRead = 0;
 			}
+			System.out.println();
 			System.out.println();
 		}
 		catch(SocketException se)
@@ -269,8 +284,6 @@ public class TCPClient
 			/* Keep reading commands */
 			while (true)
 			{
-				s = new Socket(server, serverPort);
-
 				System.out.print("Enter command> ");
 				String str = in.readLine();
 
@@ -283,6 +296,8 @@ public class TCPClient
 					printHelpMessage();
 					continue;
 				}
+
+				s = new Socket(server, serverPort);
 				processAndSend(s, str);
 				s.close();
 			}
@@ -326,13 +341,22 @@ public class TCPClient
 		System.out.println("Enter commands at the prompt to send A2 protocol messages to " +
 				"your server");
 		System.out.println("To send a NEW_TXN message, type:");
+		System.out.println("\t new_txn <txn_num> <seq_num> <any content_length> <file_name>");
+		System.out.println("For example:");
 		System.out.println("\t new_txn");
-
+		System.out.println("The program will generate new filename for you");
+		System.out.println("\t or type");
+		System.out.println("\t new_txn -1 0 1 file.txt");
+		System.out.println("The program will initiate new transaction with file name \"file.txt\"");
+		
 		System.out.println("To send a WRITE message, type:");
-		System.out.println("\t write <txn_num> <seq_num>");
+		System.out.println("\t write <txn_num> <seq_num> <any content_length> <file_name>");
 		System.out.println("For example:");
 		System.out.println("\t write 1 1");
 		System.out.println("The program will generate some content for you");
+		System.out.println("or type:");
+		System.out.println("\t write 1 1 1 hello");
+		System.out.println("The program will send \"hello\" text for you");
 
 		System.out.println("To send a COMMIT message, type:");
 		System.out.println("\t commit <txn_num> <seq_num>");
