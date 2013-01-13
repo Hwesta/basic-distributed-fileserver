@@ -1,18 +1,21 @@
-=== CMPT431 Assignment 2 ===
-=== A Distributed File System with Transactional Semantics ===
+=== CMPT431 Assignment 3 ===
+=== A Replicated File System with Transactional Semantics ===
 === By Holly Becker ===
 
-Language: Python
-Libraries: Twisted
+Language: Python 2.7.3
+Libraries: Twisted 11.1.0
 
 == Installation ==
 Python and Twisted are already installed on Ubuntu.
-Confirmed on nile.csil.sfu.ca with Ubuntu 11.04 on August 17, 2012
+Confirmed on asb9838s-c09.csil.sfu.ca, asb9838s-c08.csil.sfu.ca and asb9838s-c10.csil.sfu.ca with Ubuntu 12.04 on Sept 23, 2012.
 
 == Running ==
 
 From the directory where server.py is located:
-$ python server.py -dir DIRECTORY
+$ python server.py -dir DIRECTORY -ip IP -port PORT -primary PATH_TO_PRIMARY
+
+To reset the state of the server, making it forget about all previosu transactions:
+$ rm DIRECTORY/.server_log/log
 
 == Example interaction ==
 
@@ -25,12 +28,12 @@ ACK 3 0 0 0
 
 
 --> Client
-WRITE 3 1 26
+WRITE 3 0 26
 
 The weather is hot today.
 --> Server
 --> Client
-COMMIT 3 2 0
+COMMIT 3 1 0
 
 
 --> Server
@@ -49,24 +52,54 @@ The weather is hot today.
 
 Expected sequence numbers are
 NEW_TXN = 0
-WRITE = 1-N
+WRITE = 0-N
 COMMIT = N+1
-Thus, in normal operation, the sequence number of each message increases by 1.
 
 Server-specific files are stored in DIRECTORY/.server_log/
 The log is written to DIRECTORY/.server_log/log and is never removed.
 
-Transactions started over 5 minutes ago are marked as aborted when the server is shutdown.
+Transactions started over 5 minutes ago are marked as aborted when the server is shutdown.  Uncommitted transactions found in the log are deleted on startup.
 
 WRITE has no ACK.
 
-Behaviour if files in .server_log are modified is undefined.
+Behaviour if primary.txt or files in .server_log are modified is undefined.  Behaviour if file names are in unicode is undefined.
 
-Q12:
+READ will only return the first 100K of data.
+
+A2 Q12:
 Aa: If the client sends multiple writes to the same transation with the same message sequence number, the old write will be replaced by the new write.
 Ba: If the client commits with fewer writes than it gave (eg. commit saying 4 write, but sent 5 messages), the higher numbered writes will be ignored.
 
-Q24:
+A2 Q24:
 The server never forgets transactions.
 
-Debugging output of the log file is printed to the console for each transaction.  It can be ignored, or used to confirm that messages have been processed correctly.
+Debugging output can be printed by using -v though -vvvvv if desired. -vvv is a good choice.
+
+The secondary replies with 'ERROR 207 Connect to primary at ip:port' if contacted.
+
+== New Messages ==
+
+Several new messages were implemented for communication between the servers.
+
+Secondary announcing itself to the primary:
+-> NEW_SEC 0 0 0
+->
+-> <list of files and hashes for identification>
+
+Primary telling the secondary what files to sync on boot:
+-> SYNC_FILES length
+->
+-> <list of files to sync>
+
+Secondary asking for the existing log from the primary on boot:
+-> SYNC_LOG 0 0 0
+->
+->
+
+Primary telling the secondary to commit/abort a transactions:
+-> SEC_COMMIT/SEC_ABORT transaction_id sequence_number length
+->
+-> <log entry for that transactions>
+
+The secondary can also send a READ to sync the files initially.
+
